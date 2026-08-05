@@ -1,0 +1,98 @@
+import uuid
+from datetime import datetime
+from enum import StrEnum
+
+from sqlalchemy import ARRAY, Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+from app.models.mixins import TimestampMixin, UUIDPKMixin
+
+
+class UserRoleEnum(StrEnum):
+    """Coarse role — always present, checked on nearly every endpoint."""
+
+    USER = "user"
+    ADMIN = "admin"
+
+
+class UserStatus(StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+# The 8 fine-grained permissions from the admin "Roles & Permissions" screen.
+# Source of truth for `Role.permissions` array contents — enforced server-side
+# by app.core.permissions, not just used to render checkboxes in the UI.
+PERMISSION_LIST = [
+    "Approve Requests",
+    "Manage Users",
+    "Edit Datasets",
+    "Delete Datasets",
+    "Publish Content",
+    "Manage Roles",
+    "View Analytics",
+    "Manage Backups",
+]
+
+
+class User(UUIDPKMixin, TimestampMixin, Base):
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    institution: Mapped[str | None] = mapped_column(String(255))
+    phone: Mapped[str | None] = mapped_column(String(50))
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default=UserRoleEnum.USER.value)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=UserStatus.ACTIVE.value)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    avatar_key: Mapped[str | None] = mapped_column(String(512))
+    bio: Mapped[str | None] = mapped_column(Text)
+    research_area: Mapped[str | None] = mapped_column(String(255))
+    datasets_granted: Mapped[int] = mapped_column(default=0, nullable=False)
+
+    user_roles: Mapped[list["UserRole"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == UserRoleEnum.ADMIN.value
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == UserStatus.ACTIVE.value
+
+
+class Role(UUIDPKMixin, TimestampMixin, Base):
+    """Fine-grained permission template (e.g. 'Data Manager', 'Reviewer')."""
+
+    __tablename__ = "roles"
+
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    permissions: Mapped[list[str]] = mapped_column(ARRAY(String(64)), default=list, nullable=False)
+
+    user_roles: Mapped[list["UserRole"]] = relationship(
+        back_populates="role", cascade="all, delete-orphan"
+    )
+
+
+class UserRole(UUIDPKMixin, Base):
+    """A user's assignment to a fine-grained Role (in addition to their coarse role)."""
+
+    __tablename__ = "user_roles"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("roles.id", ondelete="CASCADE"), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="user_roles")
+    role: Mapped["Role"] = relationship(back_populates="user_roles")
+
+    __table_args__ = ()

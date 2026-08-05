@@ -1,0 +1,161 @@
+name: bodp-platform
+
+x-backend-env: &backend-env
+  ENVIRONMENT: production
+  DEBUG: "false"
+  FRONTEND_URL: ${FRONTEND_URL}
+  BACKEND_URL: ${BACKEND_URL}
+  DATABASE_URL: postgresql+asyncpg://bodp:${POSTGRES_PASSWORD}@postgres:5432/bodp
+  DATABASE_URL_SYNC: postgresql+psycopg://bodp:${POSTGRES_PASSWORD}@postgres:5432/bodp
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+  CORS_ORIGINS: ${CORS_ORIGINS}
+  STORAGE_VPS_ENDPOINT_URL: http://minio:9000
+  STORAGE_VPS_ACCESS_KEY: ${MINIO_ROOT_USER}
+  STORAGE_VPS_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+  STORAGE_VPS_BUCKET: ${STORAGE_VPS_BUCKET:-bodp-vps}
+  STORAGE_CLOUD_ENDPOINT_URL: ${STORAGE_CLOUD_ENDPOINT_URL:-}
+  STORAGE_CLOUD_ACCESS_KEY: ${STORAGE_CLOUD_ACCESS_KEY:-}
+  STORAGE_CLOUD_SECRET_KEY: ${STORAGE_CLOUD_SECRET_KEY:-}
+  STORAGE_CLOUD_BUCKET: ${STORAGE_CLOUD_BUCKET:-}
+  SMTP_HOST: ${SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME}
+  SMTP_PASSWORD: ${SMTP_PASSWORD}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS}
+
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bodp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: bodp
+    volumes:
+      - bodp_pgdata:/var/lib/postgresql/data
+    # No host port mapping in prod — only reachable on the internal Docker
+    # network, per Master Plan §0 network isolation requirement.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bodp -d bodp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - bodp_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - bodp_minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker
+             --bind 0.0.0.0:8000 --workers 4 --timeout 120
+             --access-logfile - --error-logfile -"
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app beat --loglevel=info
+
+  # Built in a later phase (frontend rebuild is out of scope for Phase 1) —
+  # placeholder service definition so `docker compose config` stays valid
+  # once ./frontend exists. Not started by default until then.
+  # frontend:
+  #   build:
+  #     context: ./frontend
+  #     dockerfile: Dockerfile
+  #   restart: unless-stopped
+  #   environment:
+  #     NEXT_PUBLIC_API_URL: ${BACKEND_URL}/api/v1
+  #   depends_on:
+  #     - backend
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - bodp_certbot_www:/var/www/certbot:ro
+      - bodp_certbot_certs:/etc/letsencrypt:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - backend
+
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - bodp_certbot_www:/var/www/certbot
+      - bodp_certbot_certs:/etc/letsencrypt
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot; sleep 12h; done"
+
+volumes:
+  bodp_pgdata:
+  bodp_redis_data:
+  bodp_minio_data:
+  bodp_certbot_www:
+  bodp_certbot_certs:

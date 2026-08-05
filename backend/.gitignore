@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+.env
+.env.local
+!.env.example
+
+*.log
+.DS_Store
+
+# Alembic-generated tsbuildinfo-style caches aren't a thing, but keep this
+# dir clean of any local scratch db files if sqlite is ever used ad hoc.
+*.db
+*.sqlite3

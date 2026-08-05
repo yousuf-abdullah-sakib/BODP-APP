@@ -1,0 +1,35 @@
+# --- Secrets / environment ---
+.env
+.env.local
+.env.prod
+!.env.example
+!.env.prod.example
+
+# --- Python (backend) ---
+backend/.venv/
+**/__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+backend/celerybeat-schedule
+*.db
+*.sqlite3
+
+# --- Node (frontend prototype — reference only, has its own git repo, not
+# tracked as part of this project; see MASTER_PLAN.md) ---
+bodp-frontend/
+node_modules/
+.next/
+*.tsbuildinfo
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+
+# --- Claude Code local state ---
+.claude/scheduled_tasks.lock

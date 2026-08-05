@@ -1,0 +1,130 @@
+name: bodp-platform
+
+x-backend-env: &backend-env
+  ENVIRONMENT: development
+  DEBUG: "true"
+  FRONTEND_URL: http://localhost:3000
+  BACKEND_URL: http://localhost:8000
+  DATABASE_URL: postgresql+asyncpg://bodp:${POSTGRES_PASSWORD:-bodp_dev_pw}@postgres:5432/bodp
+  DATABASE_URL_SYNC: postgresql+psycopg://bodp:${POSTGRES_PASSWORD:-bodp_dev_pw}@postgres:5432/bodp
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-only-insecure-secret-change-in-production-min-32-chars}
+  CORS_ORIGINS: '["http://localhost:3000"]'
+  STORAGE_VPS_ENDPOINT_URL: http://minio:9000
+  STORAGE_VPS_ACCESS_KEY: ${MINIO_ROOT_USER:-bodp_minio_admin}
+  STORAGE_VPS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-bodp_minio_dev_secret}
+  STORAGE_VPS_BUCKET: bodp-vps
+  SMTP_HOST: ${SMTP_HOST:-localhost}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: bodp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bodp_dev_pw}
+      POSTGRES_DB: bodp
+    volumes:
+      - bodp_pgdata:/var/lib/postgresql/data
+    ports:
+      # Host port intentionally non-default (55432) to avoid colliding with
+      # any other local Postgres instance on the standard 5432 port.
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bodp -d bodp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - bodp_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-bodp_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-bodp_minio_dev_secret}
+    volumes:
+      - bodp_minio_data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/app
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.worker.celery_app beat --loglevel=info
+
+volumes:
+  bodp_pgdata:
+  bodp_redis_data:
+  bodp_minio_data:
