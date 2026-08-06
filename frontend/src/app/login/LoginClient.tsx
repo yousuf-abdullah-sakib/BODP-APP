@@ -4,7 +4,7 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useSession } from "@/context/SessionContext";
-import { register as apiRegister } from "@/lib/api/auth";
+import { register as apiRegister, requestPasswordReset } from "@/lib/api/auth";
 import { ApiError } from "@/lib/api/client";
 
 export default function LoginClient() {
@@ -16,6 +16,11 @@ export default function LoginClient() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginBusy, setLoginBusy] = useState(false);
+
+  const [showForgot, setShowForgot] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState("");
+  const [forgotMessage, setForgotMessage] = useState("");
+  const [forgotBusy, setForgotBusy] = useState(false);
 
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
@@ -41,6 +46,22 @@ export default function LoginClient() {
       setLoginError(err instanceof ApiError ? err.message : "Unable to sign in. Please try again.");
     } finally {
       setLoginBusy(false);
+    }
+  }
+
+  async function doForgotPassword() {
+    setForgotMessage("");
+    if (!forgotEmail.trim()) return;
+    setForgotBusy(true);
+    try {
+      await requestPasswordReset(forgotEmail.trim());
+      setForgotMessage("If an account exists for this email, a reset link has been sent.");
+    } catch (err) {
+      setForgotMessage(
+        err instanceof ApiError ? err.message : "Unable to send reset email. Please try again."
+      );
+    } finally {
+      setForgotBusy(false);
     }
   }
 
@@ -129,6 +150,35 @@ export default function LoginClient() {
                 onChange={(e) => setLoginPassword(e.target.value)}
               />
             </div>
+            <div style={{ textAlign: "right", marginBottom: "1rem" }}>
+              <a
+                style={{ fontSize: "0.8rem", color: "var(--accent)", cursor: "pointer" }}
+                onClick={() => {
+                  setShowForgot((v) => !v);
+                  setForgotMessage("");
+                }}
+              >
+                Forgot password?
+              </a>
+            </div>
+            {showForgot && (
+              <div style={{ marginBottom: "1rem" }}>
+                {forgotMessage && <div className="auth-success">{forgotMessage}</div>}
+                <div className="form-group">
+                  <label className="form-label">Email Address</label>
+                  <input
+                    className="form-input"
+                    type="email"
+                    placeholder="your@email.com"
+                    value={forgotEmail}
+                    onChange={(e) => setForgotEmail(e.target.value)}
+                  />
+                </div>
+                <button className="btn-submit" disabled={forgotBusy} onClick={doForgotPassword}>
+                  {forgotBusy ? "Sending…" : "Send Reset Link"}
+                </button>
+              </div>
+            )}
             <button className="btn-submit" disabled={loginBusy} onClick={doLogin}>
               {loginBusy ? "Signing in…" : "Sign In"}
             </button>
