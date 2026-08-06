@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
     EXTRACTION_SYNC_THRESHOLD_MB: int = 10
 
+    # --- Visualization engine (Master Plan §3 Phase 7) ---
+    # Spatial interpolation requests at or below point_count * resolution^2
+    # work units compute synchronously in-process; larger ones dispatch to
+    # Celery. At the prototype's resolution options (20/40/60) and typical
+    # station counts (~20-30), this keeps "low"/"medium" always sync and
+    # only pushes "high" with many stations to a background job.
+    VIZ_SPATIAL_SYNC_THRESHOLD_CELLS: int = 40_000
+
     # --- Email (SMTP-compatible transactional provider; swappable) ---
     SMTP_HOST: str = "localhost"
     SMTP_PORT: int = 587

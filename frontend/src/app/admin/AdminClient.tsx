@@ -5,6 +5,8 @@ import DashboardShell, { type DashNavGroup } from "@/components/dashboard/Dashbo
 import { getAdminRequests } from "@/lib/api/admin-requests";
 import AdminRequestsSection from "./sections/AdminRequestsSection";
 import GrantsSection from "./sections/GrantsSection";
+import VisualizationExportsSection from "./sections/VisualizationExportsSection";
+import DataVisualizationSection from "./sections/DataVisualizationSection";
 
 export default function AdminClient() {
   const [active, setActive] = useState("requests");
@@ -25,6 +27,13 @@ export default function AdminClient() {
         { key: "grants", label: "Access Grants", icon: "🔑" },
       ],
     },
+    {
+      title: "Visualization",
+      items: [
+        { key: "viz-exports", label: "Export Settings", icon: "📤" },
+        { key: "viz-boundary", label: "Boundary Shapefile", icon: "🗺️" },
+      ],
+    },
   ];
 
   return (
@@ -33,6 +42,8 @@ export default function AdminClient() {
         <AdminRequestsSection onMutate={() => setPendingCountVersion((v) => v + 1)} />
       )}
       {active === "grants" && <GrantsSection />}
+      {active === "viz-exports" && <VisualizationExportsSection />}
+      {active === "viz-boundary" && <DataVisualizationSection />}
     </DashboardShell>
   );
 }

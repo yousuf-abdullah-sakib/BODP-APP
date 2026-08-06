@@ -33,6 +33,7 @@ dependencies = [
     "netCDF4>=1.7.2",
     "h5netcdf>=1.4.0",
     "scipy>=1.14.1",
+    "numpy>=2.0.0",
     "h5py>=3.12.1",
     "rasterio>=1.4.3",
     "python-magic-bin>=0.4.14; platform_system=='Windows'",

@@ -22,6 +22,7 @@ from app.models.notifications import Notification, SupportTicket
 from app.models.requests import AccessGrant, DatasetRequest, DownloadLog, SubsetExtraction
 from app.models.uploads import QualityIssue, Upload
 from app.models.user import Role, User, UserPreferences, UserRole
+from app.models.visualize import VisualizationJob, VizJobStatus
 
 __all__ = [
     "User",
@@ -54,4 +55,6 @@ __all__ = [
     "BoundaryShapefile",
     "Notification",
     "SupportTicket",
+    "VisualizationJob",
+    "VizJobStatus",
 ]

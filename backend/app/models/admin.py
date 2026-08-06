@@ -146,6 +146,15 @@ class SiteSettings(Base):
     notify_new_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notify_expiring_dataset: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # Master Plan §3 Phase 7 — per-module export/download toggles for the
+    # Visualize page, admin-controlled. Frontend hides the export action
+    # when off; any future server-rendered export endpoint must check
+    # these too (see settings_service.py).
+    viz_export_temporal_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    viz_export_spatial_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    viz_export_comparison_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    viz_export_statistics_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
 
 class BoundaryShapefile(UUIDPKMixin, Base):
     """Backs the shared admin-uploader / public-map-clip-boundary feature."""

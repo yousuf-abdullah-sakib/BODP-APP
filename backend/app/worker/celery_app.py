@@ -13,6 +13,7 @@ celery_app = Celery(
         "app.worker.tasks.ingestion",
         "app.worker.tasks.notifications",
         "app.worker.tasks.extraction",
+        "app.worker.tasks.visualize",
     ],
 )
 
