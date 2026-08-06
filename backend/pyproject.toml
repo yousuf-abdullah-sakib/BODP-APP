@@ -38,6 +38,7 @@ dependencies = [
     "rasterio>=1.4.3",
     "python-magic-bin>=0.4.14; platform_system=='Windows'",
     "python-magic>=0.4.27; platform_system!='Windows'",
+    "nh3>=0.2.18",
 ]
 
 [project.optional-dependencies]

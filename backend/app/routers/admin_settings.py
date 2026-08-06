@@ -4,6 +4,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.permissions import require_admin
 from app.models.user import User
+from app.schemas.admin_general_settings import (
+    GeneralSettingsSchema,
+    GeneralSettingsUpdate,
+    NotificationSettingsSchema,
+    NotificationSettingsUpdate,
+)
 from app.schemas.admin_overview import StorageCapacitySchema, StorageCapacityUpdate
 from app.schemas.visualize import (
     VizComputeLimitsSchema,
@@ -14,6 +20,40 @@ from app.schemas.visualize import (
 from app.services import settings_service
 
 router = APIRouter(prefix="/admin/settings", tags=["admin-settings"])
+
+
+@router.get("/general", response_model=GeneralSettingsSchema)
+async def get_general_settings(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.get_settings(db)
+
+
+@router.patch("/general", response_model=GeneralSettingsSchema)
+async def update_general_settings(
+    body: GeneralSettingsUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.update_settings(db, body)
+
+
+@router.get("/notifications", response_model=NotificationSettingsSchema)
+async def get_notification_settings(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.get_settings(db)
+
+
+@router.patch("/notifications", response_model=NotificationSettingsSchema)
+async def update_notification_settings(
+    body: NotificationSettingsUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.update_settings(db, body)
 
 
 @router.get("/visualization-exports", response_model=VizExportSettingsSchema)

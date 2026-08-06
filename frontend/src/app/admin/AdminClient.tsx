@@ -8,12 +8,19 @@ import AdminDatasetsSection from "./sections/AdminDatasetsSection";
 import AdminManagementSection from "./sections/AdminManagementSection";
 import AdminNotificationsSection from "./sections/AdminNotificationsSection";
 import AdminRequestsSection from "./sections/AdminRequestsSection";
+import AnalyticsSection from "./sections/AnalyticsSection";
+import AuditLogSection from "./sections/AuditLogSection";
+import BlogPostsSection from "./sections/BlogPostsSection";
 import DataQualityCheckSection from "./sections/DataQualityCheckSection";
 import DatasetCategoriesSection from "./sections/DatasetCategoriesSection";
 import DataVisualizationSection from "./sections/DataVisualizationSection";
 import GrantsSection from "./sections/GrantsSection";
+import MediaLibrarySection from "./sections/MediaLibrarySection";
 import OverviewSection from "./sections/OverviewSection";
+import ReportsSection from "./sections/ReportsSection";
 import RolesPermissionsSection from "./sections/RolesPermissionsSection";
+import SettingsSection from "./sections/SettingsSection";
+import SiteContentSection from "./sections/SiteContentSection";
 import UsersSection from "./sections/UsersSection";
 import VisualizationExportsSection from "./sections/VisualizationExportsSection";
 import VisualizationLimitsSection from "./sections/VisualizationLimitsSection";
@@ -76,6 +83,18 @@ export default function AdminClient() {
         { key: "viz-boundary", label: "Boundary Shapefile", icon: "🗺️" },
       ],
     },
+    {
+      title: "Content & Reporting",
+      items: [
+        { key: "blog", label: "Blog Posts", icon: "📝" },
+        { key: "media", label: "Media Library", icon: "🖼️" },
+        { key: "content", label: "Site Content", icon: "📄" },
+        { key: "analytics", label: "Analytics", icon: "📈" },
+        { key: "reports", label: "Reports", icon: "🧾" },
+        { key: "audit", label: "Audit Log", icon: "🕵️" },
+        { key: "settings", label: "Settings", icon: "⚙️" },
+      ],
+    },
   ];
 
   return (
@@ -105,6 +124,13 @@ export default function AdminClient() {
       {active === "viz-exports" && <VisualizationExportsSection />}
       {active === "viz-limits" && <VisualizationLimitsSection />}
       {active === "viz-boundary" && <DataVisualizationSection />}
+      {active === "blog" && <BlogPostsSection />}
+      {active === "media" && <MediaLibrarySection />}
+      {active === "content" && <SiteContentSection />}
+      {active === "analytics" && <AnalyticsSection />}
+      {active === "reports" && <ReportsSection />}
+      {active === "audit" && <AuditLogSection />}
+      {active === "settings" && <SettingsSection />}
     </DashboardShell>
   );
 }

@@ -2,6 +2,7 @@ from app.services.storage.base import StorageBackendError, StorageObject, Storag
 from app.services.storage.keys import (
     avatar_key,
     extract_key,
+    media_key,
     previews_key,
     processed_key,
     raw_key,
@@ -18,4 +19,5 @@ __all__ = [
     "extract_key",
     "previews_key",
     "avatar_key",
+    "media_key",
 ]

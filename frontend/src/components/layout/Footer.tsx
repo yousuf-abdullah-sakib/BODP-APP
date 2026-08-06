@@ -1,15 +1,35 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { getCmsBlocks, blocksToMap } from "@/lib/api/content";
+
+const FALLBACK_DESCRIPTION =
+  "Bangladesh Oceanographic Data Portal — Open access marine & environmental data for the Bay of Bengal region.";
+const FALLBACK_COPYRIGHT = "© 2026 Bangladesh Oceanographic Data Portal · CC BY 4.0";
 
 export default function Footer() {
+  const [description, setDescription] = useState(FALLBACK_DESCRIPTION);
+  const [copyright, setCopyright] = useState(FALLBACK_COPYRIGHT);
+
+  useEffect(() => {
+    getCmsBlocks("footer")
+      .then((blocks) => {
+        const map = blocksToMap(blocks);
+        if (map["footer.brand.description"]) setDescription(map["footer.brand.description"]);
+        if (map["footer.copyright"]) setCopyright(map["footer.copyright"]);
+      })
+      .catch(() => {
+        /* keep fallback text on failure */
+      });
+  }, []);
+
   return (
     <footer>
       <div className="footer-grid">
         <div>
           <div className="footer-brand">BODP</div>
-          <div className="footer-desc">
-            Bangladesh Oceanographic Data Portal — Open access marine &amp; environmental data for
-            the Bay of Bengal region.
-          </div>
+          <div className="footer-desc">{description}</div>
         </div>
         <div className="footer-col">
           <h4>Data</h4>
@@ -46,19 +66,19 @@ export default function Footer() {
           <h4>Legal</h4>
           <ul>
             <li>
-              <Link href="#">Data License (CC BY 4.0)</Link>
+              <Link href="/legal/download-policy">Data License (CC BY 4.0)</Link>
             </li>
             <li>
-              <Link href="#">Privacy Policy</Link>
+              <Link href="/legal/privacy-policy">Privacy Policy</Link>
             </li>
             <li>
-              <Link href="#">Terms of Use</Link>
+              <Link href="/legal/terms-conditions">Terms of Use</Link>
             </li>
           </ul>
         </div>
       </div>
       <div className="footer-bottom">
-        <span>© 2024 Bangladesh Oceanographic Data Portal · CC BY 4.0</span>
+        <span>{copyright}</span>
         <span>Dhaka, Bangladesh 🇧🇩</span>
       </div>
     </footer>

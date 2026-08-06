@@ -18,6 +18,7 @@ from app.core.security import (
 )
 from app.models.audit import ActiveSession, FailedLogin
 from app.models.user import User, UserRoleEnum, UserStatus
+from app.services import settings_service
 from app.services.admin_notify_service import notify_admins
 from app.services.email_service import email_service
 
@@ -165,7 +166,10 @@ class AuthService:
         user_agent: str | None,
     ) -> tuple[str, str]:
         session_id = str(uuid.uuid4())
-        access_token = create_access_token(str(user.id), user.role, session_id)
+        expire_minutes = await settings_service.get_session_lifetime_minutes(db)
+        access_token = create_access_token(
+            str(user.id), user.role, session_id, expire_minutes=expire_minutes
+        )
         refresh_token = create_refresh_token(str(user.id), session_id)
 
         refresh_payload = decode_token(refresh_token, expected_type=TokenType.REFRESH)
@@ -210,7 +214,10 @@ class AuthService:
         session.last_active_at = datetime.now(timezone.utc)
         await db.commit()
 
-        new_access_token = create_access_token(str(user.id), user.role, payload["sid"])
+        expire_minutes = await settings_service.get_session_lifetime_minutes(db)
+        new_access_token = create_access_token(
+            str(user.id), user.role, payload["sid"], expire_minutes=expire_minutes
+        )
         return new_access_token, refresh_token
 
     async def logout(self, db: AsyncSession, refresh_token: str) -> None:

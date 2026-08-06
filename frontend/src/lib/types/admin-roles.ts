@@ -31,4 +31,10 @@ export const PERMISSION_LIST = [
   "Manage Roles",
   "View Analytics",
   "Manage Backups",
+  // Phase 9 — content/reporting admin surfaces.
+  "Manage CMS",
+  "Manage Blog",
+  "Manage Media",
+  "View Reports",
+  "View Audit Log",
 ] as const;

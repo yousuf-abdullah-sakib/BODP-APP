@@ -1,0 +1,70 @@
+/* ── Mission / Vision cards ── */
+.mv-band{padding:3.5rem 2rem;background:var(--bg-secondary);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.mv-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;max-width:1200px;margin:0 auto}
+@media(max-width:640px){.mv-grid{grid-template-columns:1fr}}
+.mv-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:2rem;position:relative;overflow:hidden}
+.mv-card::before{content:'';position:absolute;top:-40px;right:-40px;width:120px;height:120px;border-radius:50%;background:rgba(15,118,110,0.06);pointer-events:none}
+.mv-icon{font-size:2rem;margin-bottom:1rem}
+.mv-title{font-size:1rem;font-weight:800;color:var(--text-primary);margin-bottom:0.7rem}
+.mv-body{font-size:0.85rem;color:var(--text-muted);line-height:1.75}
+
+/* ── What we do — icon list ── */
+.what-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin-top:2rem}
+.what-item{display:flex;gap:1rem;align-items:flex-start;background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:1.3rem;transition:border-color 0.2s}
+.what-item:hover{border-color:var(--border-hover)}
+.what-icon{width:40px;height:40px;min-width:40px;border-radius:10px;background:rgba(15,118,110,0.1);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:1.1rem}
+.what-text h4{font-size:0.88rem;font-weight:700;color:var(--text-primary);margin-bottom:0.3rem}
+.what-text p{font-size:0.8rem;color:var(--text-muted);line-height:1.6}
+
+/* ── Stats banner ── */
+.about-stats-band{background:var(--border);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.about-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;max-width:1200px;margin:0 auto}
+.about-stat{background:var(--bg-primary);padding:2rem 1rem;text-align:center}
+.about-stat-num{font-size:2rem;font-weight:800;color:var(--accent);line-height:1}
+.about-stat-unit{font-size:0.8rem;color:var(--accent);font-weight:600;margin-top:0.1rem}
+.about-stat-label{font-size:0.72rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.08em;margin-top:0.4rem}
+@media(max-width:600px){.about-stats{grid-template-columns:repeat(2,1fr)}}
+
+/* ── Team cards ── */
+.team-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:1.2rem;margin-top:2rem}
+.team-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.8rem 1.5rem;text-align:center;transition:border-color 0.2s,transform 0.2s}
+.team-card:hover{border-color:var(--border-hover);transform:translateY(-3px)}
+.team-avatar{width:68px;height:68px;border-radius:50%;background:linear-gradient(135deg,var(--accent-dark),rgba(15,118,110,0.3));border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:1.6rem;margin:0 auto 1rem}
+.team-avatar-photo{width:68px;height:68px;border-radius:50%;object-fit:cover;border:2px solid var(--border);margin:0 auto 1rem}
+.team-name{font-weight:700;font-size:0.92rem;color:var(--text-primary);margin-bottom:0.2rem}
+.team-role{font-size:0.75rem;color:var(--accent);font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:0.6rem}
+.team-desc{font-size:0.78rem;color:var(--text-muted);line-height:1.6}
+
+/* ── Timeline ── */
+.timeline{position:relative;padding:0 0 0 2rem;margin-top:2rem}
+.timeline::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px;background:linear-gradient(to bottom,var(--accent),transparent)}
+.tl-item{position:relative;margin-bottom:2rem;padding-left:1.5rem}
+.tl-item::before{content:'';position:absolute;left:-2.2rem;top:0.35rem;width:10px;height:10px;border-radius:50%;background:var(--accent);border:2px solid var(--bg-primary);box-shadow:0 0 0 3px rgba(15,118,110,0.2)}
+.tl-year{font-size:0.7rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.1em;margin-bottom:0.3rem}
+.tl-title{font-weight:700;font-size:0.92rem;color:var(--text-primary);margin-bottom:0.3rem}
+.tl-desc{font-size:0.82rem;color:var(--text-muted);line-height:1.65}
+
+/* ── Partners ── */
+.partner-logos{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:1rem;margin-top:2rem}
+.partner-logo-card{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:1.2rem 1rem;display:flex;align-items:center;gap:0.8rem;transition:border-color 0.2s}
+.partner-logo-card:hover{border-color:var(--border-hover)}
+.pl-icon{font-size:1.4rem}
+.pl-name{font-size:0.8rem;font-weight:600;color:var(--text-secondary)}
+.pl-type{font-size:0.68rem;color:var(--text-muted);margin-top:0.1rem}
+
+/* ── CTA band ── */
+.cta-band{padding:4rem 2rem;text-align:center;background:var(--bg-secondary);border-top:1px solid var(--border)}
+.cta-band h2{font-size:clamp(1.3rem,3vw,2rem);font-weight:800;color:var(--text-primary);margin-bottom:0.8rem}
+.cta-band p{color:var(--text-muted);font-size:0.92rem;max-width:480px;margin:0 auto 2rem;line-height:1.7}
+.cta-btns{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}
+
+.prose p{color:var(--text-secondary);font-size:0.92rem;line-height:1.85;margin-bottom:1.2rem}
+.prose p:last-child{margin-bottom:0}
+.prose h1,.prose h2,.prose h3,.prose h4{color:var(--text-primary);font-weight:800;margin:1.5rem 0 0.8rem}
+.prose h1:first-child,.prose h2:first-child,.prose h3:first-child,.prose h4:first-child{margin-top:0}
+.prose ul,.prose ol{color:var(--text-secondary);font-size:0.92rem;line-height:1.85;margin-bottom:1.2rem;padding-left:1.5rem}
+.prose li{margin-bottom:0.4rem}
+.prose a{color:var(--accent)}
+.prose strong{color:var(--text-primary)}
+.prose table{width:100%;border-collapse:collapse;margin-bottom:1.2rem}
+.prose th,.prose td{border:1px solid var(--border);padding:0.5rem;text-align:left;font-size:0.85rem}

@@ -161,19 +161,36 @@ class S3CompatibleBackend(StorageService):
                 raise StorageBackendError(f"Failed to create bucket {bucket}") from exc
 
     def set_public_prefix_policy(self, bucket: str, prefix: str) -> None:
+        # put_bucket_policy REPLACES the whole policy document — this bucket
+        # can have multiple public prefixes (avatars/, media/) granted at
+        # different times by different callers, so this must merge with
+        # whatever policy already exists rather than clobbering it. Read
+        # the current policy first (absent/malformed = start fresh), add
+        # this prefix's statement if it isn't already present, write back
+        # the union.
         import json
 
-        policy = {
-            "Version": "2012-10-17",
-            "Statement": [
+        resource = f"arn:aws:s3:::{bucket}/{prefix}*"
+        try:
+            existing_raw = self._client.get_bucket_policy(Bucket=bucket)["Policy"]
+            policy = json.loads(existing_raw)
+        except ClientError:
+            policy = {"Version": "2012-10-17", "Statement": []}
+
+        already_present = any(
+            resource in (stmt.get("Resource") if isinstance(stmt.get("Resource"), list) else [stmt.get("Resource")])
+            for stmt in policy.get("Statement", [])
+        )
+        if not already_present:
+            policy.setdefault("Statement", []).append(
                 {
                     "Effect": "Allow",
                     "Principal": {"AWS": ["*"]},
                     "Action": ["s3:GetObject"],
-                    "Resource": [f"arn:aws:s3:::{bucket}/{prefix}*"],
+                    "Resource": [resource],
                 }
-            ],
-        }
+            )
+
         try:
             self._client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
         except ClientError as exc:

@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from sqlalchemy import ARRAY, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.mixins import UUIDPKMixin
@@ -37,7 +37,9 @@ class BlogPost(UUIDPKMixin, Base):
     content_html: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=BlogPostStatus.DRAFT.value)
     featured: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    featured_image_key: Mapped[str | None] = mapped_column(String(1024))
+    featured_image_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("media_files.id", ondelete="SET NULL")
+    )
     tags: Mapped[list[str]] = mapped_column(ARRAY(String(50)), default=list)
     views: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(
@@ -47,8 +49,15 @@ class BlogPost(UUIDPKMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=datetime.utcnow
     )
 
+    featured_image: Mapped["MediaFile | None"] = relationship(foreign_keys=[featured_image_id])
+
 
 class MediaFile(UUIDPKMixin, Base):
+    """Single source of truth for every uploaded asset (Master Plan §3
+    Phase 9 task 2/4) — blog featured images, about-team photos, and any
+    future content asset reference a row here via FK rather than storing
+    their own independent bare storage key."""
+
     __tablename__ = "media_files"
 
     file_name: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -57,6 +66,8 @@ class MediaFile(UUIDPKMixin, Base):
     storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     mime_type: Mapped[str | None] = mapped_column(String(100))
+    alt_text: Mapped[str | None] = mapped_column(String(255))
+    title: Mapped[str | None] = mapped_column(String(255))
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -65,16 +76,22 @@ class MediaFile(UUIDPKMixin, Base):
     )
 
 
-class CmsBlock(Base):
-    """Key/value content block, editable per page. Public Home/About/Contact/Footer pages
-    read from this table — closing the prototype's Footer/CMS disconnect (Master Plan §1)."""
+class CmsBlock(UUIDPKMixin, Base):
+    """Key/value content block, editable per page. Public Home/About/Contact/Footer/legal
+    pages read from this table — closing the prototype's Footer/CMS disconnect (Master
+    Plan §1). System Blocks are seeded automatically and editable but not deletable via
+    the admin UI; Custom Blocks are fully admin-managed (Master Plan §3 Phase 9 task 3)."""
 
     __tablename__ = "cms_blocks"
 
-    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    key: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     page: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    section: Mapped[str | None] = mapped_column(String(100))
     label: Mapped[str | None] = mapped_column(String(255))
     value: Mapped[str | None] = mapped_column(Text)
+    display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    is_system_block: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=datetime.utcnow
     )
@@ -86,8 +103,12 @@ class AboutTeamMember(UUIDPKMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str | None] = mapped_column(String(255))
     bio: Mapped[str | None] = mapped_column(Text)
-    photo_key: Mapped[str | None] = mapped_column(String(1024))
+    photo_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("media_files.id", ondelete="SET NULL")
+    )
     display_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    photo: Mapped["MediaFile | None"] = relationship(foreign_keys=[photo_id])
 
 
 class AdminTeamMember(UUIDPKMixin, Base):

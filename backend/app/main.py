@@ -12,11 +12,18 @@ from app.core.limiter import limiter
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.routers import (
+    admin_about_team,
+    admin_analytics,
+    admin_audit,
+    admin_blog,
     admin_boundary,
     admin_categories,
+    admin_cms,
     admin_datasets,
+    admin_media,
     admin_overview,
     admin_qc,
+    admin_reports,
     admin_requests,
     admin_roles,
     admin_settings,
@@ -24,6 +31,7 @@ from app.routers import (
     admin_users,
     auth,
     catalog,
+    content,
     me,
     requests,
     visualize,
@@ -76,6 +84,14 @@ def create_app() -> FastAPI:
     app.include_router(admin_qc.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_team.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_overview.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_media.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_cms.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_blog.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_analytics.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_reports.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_audit.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_about_team.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(content.router, prefix=settings.API_V1_PREFIX)
 
     @app.get("/api/health", tags=["health"])
     async def health():

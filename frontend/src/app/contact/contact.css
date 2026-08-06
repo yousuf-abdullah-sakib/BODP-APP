@@ -1,0 +1,82 @@
+/* ── Main contact layout ── */
+.contact-layout{display:grid;grid-template-columns:1fr 420px;gap:2.5rem;padding:3.5rem 2rem;max-width:1100px;margin:0 auto}
+@media(max-width:900px){.contact-layout{grid-template-columns:1fr}}
+
+/* ── Contact form ── */
+.contact-form-box{background:var(--bg-card);border:1px solid var(--border);border-radius:16px;padding:2rem}
+.cf-title{font-size:1rem;font-weight:800;color:var(--text-primary);margin-bottom:0.3rem}
+.cf-sub{font-size:0.82rem;color:var(--text-muted);margin-bottom:1.8rem;line-height:1.6}
+.char-count{font-size:0.68rem;color:var(--text-muted);text-align:right;margin-top:0.25rem}
+.form-consent{display:flex;align-items:flex-start;gap:0.7rem;margin:1.2rem 0}
+.form-consent input[type=checkbox]{width:16px;height:16px;min-width:16px;accent-color:var(--accent);margin-top:2px;cursor:pointer}
+.form-consent label{font-size:0.8rem;color:var(--text-muted);line-height:1.55;cursor:pointer}
+.form-consent a{color:var(--accent)}
+.btn-send{width:100%;background:linear-gradient(135deg,var(--accent-dark),var(--accent));color:#fff;font-weight:700;font-size:0.92rem;padding:0.8rem;border-radius:8px;border:none;cursor:pointer;transition:all 0.2s;font-family:inherit;display:flex;align-items:center;justify-content:center;gap:0.5rem}
+.btn-send:hover{opacity:0.9;transform:translateY(-1px)}
+.btn-send:disabled{opacity:0.6;cursor:not-allowed;transform:none}
+
+/* Form states */
+.form-alert{border-radius:8px;padding:0.75rem 1rem;font-size:0.83rem;margin-bottom:1rem;line-height:1.5}
+.form-alert-error{background:rgba(220,38,38,0.08);border:1px solid rgba(220,38,38,0.3);color:var(--red)}
+.form-alert-success{background:rgba(22,163,74,0.08);border:1px solid rgba(22,163,74,0.3);color:var(--green)}
+
+/* ── Sidebar info ── */
+.contact-sidebar{display:flex;flex-direction:column;gap:1.2rem}
+
+.info-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem}
+.info-card-title{font-size:0.72rem;font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--accent);margin-bottom:1.1rem;padding-bottom:0.6rem;border-bottom:1px solid var(--border)}
+
+.contact-item{display:flex;gap:0.9rem;align-items:flex-start;margin-bottom:1.1rem}
+.contact-item:last-child{margin-bottom:0}
+.ci-icon{width:36px;height:36px;min-width:36px;border-radius:9px;background:rgba(15,118,110,0.1);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:1rem}
+.ci-label{font-size:0.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.06em;font-weight:500;margin-bottom:0.2rem}
+.ci-value{font-size:0.85rem;color:var(--text-primary);font-weight:500;line-height:1.5}
+.ci-value a{color:var(--accent);transition:opacity 0.2s}
+.ci-value a:hover{opacity:0.8}
+
+/* Office hours table */
+.hours-table{width:100%;border-collapse:collapse;font-size:0.8rem}
+.hours-table tr{border-bottom:1px solid var(--border)}
+.hours-table tr:last-child{border-bottom:none}
+.hours-table td{padding:0.45rem 0;color:var(--text-muted)}
+.hours-table td:last-child{text-align:right;color:var(--text-secondary)}
+.hours-open{color:var(--green) !important;font-weight:600}
+.hours-closed{color:var(--red) !important}
+
+/* Social links */
+.social-row{display:flex;gap:0.6rem;margin-top:0.3rem;flex-wrap:wrap}
+.social-btn{display:flex;align-items:center;gap:0.5rem;background:rgba(15,118,110,0.06);border:1px solid var(--border);border-radius:7px;padding:0.45rem 0.8rem;font-size:0.78rem;color:var(--text-muted);cursor:pointer;text-decoration:none;transition:all 0.2s}
+.social-btn:hover{border-color:var(--accent);color:var(--accent);background:rgba(15,118,110,0.1)}
+
+/* ── FAQ section ── */
+.faq-section{padding:3.5rem 2rem;background:var(--bg-secondary);border-top:1px solid var(--border)}
+.faq-section > *{max-width:1200px;margin-left:auto;margin-right:auto}
+.faq-section > .section-tag{margin-left:max(0px,calc((100% - 1200px) / 2))}
+.faq-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1.2rem;margin-top:2rem}
+.faq-item{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;cursor:pointer;transition:border-color 0.2s}
+.faq-item:hover{border-color:var(--border-hover)}
+.faq-q{font-weight:700;font-size:0.88rem;color:var(--text-primary);margin-bottom:0.6rem;display:flex;justify-content:space-between;align-items:flex-start;gap:0.5rem}
+.faq-q span{color:var(--accent);font-size:1rem;flex-shrink:0;transition:transform 0.2s}
+.faq-a{font-size:0.81rem;color:var(--text-muted);line-height:1.7;display:none}
+.faq-item.open .faq-a{display:block}
+.faq-item.open .faq-q span{transform:rotate(45deg)}
+
+/* ── Google Map embed ── */
+.map-embed-section{padding:3.5rem 2rem;border-top:1px solid var(--border)}
+.map-embed-section > *{max-width:1200px;margin-left:auto;margin-right:auto}
+.map-embed-section > .section-tag{margin-left:max(0px,calc((100% - 1200px) / 2))}
+.map-embed-frame{position:relative;width:100%;max-width:1200px;margin:1.5rem auto 0;padding-top:38%;min-height:280px;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--bg-card)}
+.map-embed-frame iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.map-embed-link{display:inline-block;margin:1rem auto 0;color:var(--accent);font-weight:600;font-size:0.85rem;max-width:1200px}
+@media(max-width:700px){.map-embed-frame{padding-top:75%}}
+
+/* Dept grid */
+.dept-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:1rem;margin-top:2rem}
+.dept-card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.4rem}
+.dept-header{display:flex;align-items:center;gap:0.7rem;margin-bottom:0.9rem}
+.dept-icon{width:36px;height:36px;border-radius:8px;background:rgba(15,118,110,0.1);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:1rem}
+.dept-name{font-weight:700;font-size:0.88rem;color:var(--text-primary)}
+.dept-email{font-size:0.78rem;color:var(--text-muted);margin-bottom:0.3rem}
+.dept-email a{color:var(--accent)}
+.dept-rt{font-size:0.75rem;color:var(--text-muted)}
+.dept-rt b{color:var(--green)}

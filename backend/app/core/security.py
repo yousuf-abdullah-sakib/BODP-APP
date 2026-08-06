@@ -59,11 +59,17 @@ def _create_token(
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-def create_access_token(user_id: str, role: str, session_id: str) -> str:
+def create_access_token(
+    user_id: str, role: str, session_id: str, *, expire_minutes: int | None = None
+) -> str:
+    """expire_minutes defaults to the config constant, but callers may pass
+    the admin-configured SiteSettings.session_lifetime_min instead (see
+    auth_service.py, which resolves it via a cached lookup before calling
+    this) — this function stays a pure, DB-free token builder either way."""
     return _create_token(
         subject=user_id,
         token_type=TokenType.ACCESS,
-        expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        expires_delta=timedelta(minutes=expire_minutes or settings.ACCESS_TOKEN_EXPIRE_MINUTES),
         extra_claims={"role": role, "sid": session_id},
     )
 

@@ -15,6 +15,7 @@ celery_app = Celery(
         "app.worker.tasks.extraction",
         "app.worker.tasks.visualize",
         "app.worker.tasks.admin_stats",
+        "app.worker.tasks.reports",
     ],
 )
 

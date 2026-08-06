@@ -62,3 +62,10 @@ def avatar_key(user_id: uuid.UUID | str, filename: str) -> str:
     base at render time, the same way presigned-download URLs are built
     fresh rather than persisted."""
     return f"avatars/{user_id}/{sanitize_filename(filename)}"
+
+
+def media_key(media_id: uuid.UUID | str, filename: str) -> str:
+    """Key for a Media Library asset (Master Plan §3 Phase 9) — the single
+    source of truth for blog featured images, about-team photos, and any
+    other admin-uploaded content asset. Public-readable, like avatars."""
+    return f"media/{media_id}/{sanitize_filename(filename)}"
