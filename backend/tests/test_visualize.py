@@ -157,6 +157,19 @@ class TestTimeSeries:
 
 
 class TestSpatial:
+    @pytest.fixture(autouse=True)
+    async def _raise_aoi_limit(self, client, admin_headers):
+        # The 3 seeded test stations span ~2 degrees lat/lon apart (a
+        # realistic real-world spread), whose bounding box (~100,000 km²)
+        # is far larger than the default 500 km² AOI limit — raise it here
+        # so these interpolation-correctness tests aren't also exercising
+        # the AOI limit (that has its own dedicated tests below).
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_aoi_km2": 1_000_000},
+            headers=admin_headers,
+        )
+
     async def test_idw_matches_hand_computed_case(self, client):
         """3 points forming a small triangle; query the grid value exactly
         at one of the source points, which IDW must reproduce almost
@@ -422,3 +435,249 @@ class TestVisualizationExportSettings:
             json={"viz_export_temporal_enabled": False},
         )
         assert r.status_code == 401
+
+
+class TestVisualizationComputeLimits:
+    async def test_get_returns_defaults_on_first_call(self, client):
+        r = await client.get("/api/v1/admin/settings/visualization-limits")
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "viz_max_grid_resolution": 100,
+            "viz_max_aoi_km2": 500.0,
+            "viz_max_date_range_days_spatial": 3650,
+            "viz_max_date_range_days_timeseries": None,
+            "viz_max_date_range_days_comparison": None,
+            "viz_max_date_range_days_statistics": None,
+        }
+
+    async def test_patch_persists(self, client, admin_headers):
+        r = await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": 50},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["viz_max_grid_resolution"] == 50
+
+        r2 = await client.get("/api/v1/admin/settings/visualization-limits")
+        assert r2.json()["viz_max_grid_resolution"] == 50
+        assert r2.json()["viz_max_aoi_km2"] == 500.0
+
+    async def test_patch_can_set_date_range_back_to_unlimited(self, client, admin_headers):
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_date_range_days_timeseries": 30},
+            headers=admin_headers,
+        )
+        r = await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_date_range_days_timeseries": None},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["viz_max_date_range_days_timeseries"] is None
+
+    async def test_patch_rejects_non_positive_values(self, client, admin_headers):
+        r = await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_aoi_km2": 0},
+            headers=admin_headers,
+        )
+        assert r.status_code == 422
+
+    async def test_patch_requires_admin(self, client):
+        r = await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": 50},
+        )
+        assert r.status_code == 401
+
+    async def test_spatial_rejects_resolution_above_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": 10, "viz_max_aoi_km2": 1_000_000},
+            headers=admin_headers,
+        )
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 20,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+            },
+        )
+        assert r.status_code == 422
+        assert "resolution" in r.json()["error"]["message"].lower()
+
+    async def test_spatial_accepts_resolution_at_or_below_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": 10, "viz_max_aoi_km2": 1_000_000},
+            headers=admin_headers,
+        )
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 10,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_spatial_rejects_aoi_above_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        # Default viz_max_aoi_km2 is 500 — this bbox (~103,000 km²) is far
+        # over it, so no PATCH is needed to trigger the rejection.
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 5,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+            },
+        )
+        assert r.status_code == 422
+        assert "area" in r.json()["error"]["message"].lower()
+
+    async def test_spatial_accepts_aoi_at_or_below_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 5,
+                # ~0.05deg x 0.05deg around station A — well under 500 km².
+                "bounds": {"lat_min": 20.98, "lat_max": 21.02, "lon_min": 89.98, "lon_max": 90.02},
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_grid_resolution_unlimited_when_null(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": None, "viz_max_aoi_km2": 1_000_000},
+            headers=admin_headers,
+        )
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 100,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_aoi_unlimited_when_null(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_aoi_km2": None},
+            headers=admin_headers,
+        )
+        # This bbox (~103,000 km²) would normally be rejected under the
+        # default 500 km² limit.
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 5,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    async def test_grid_resolution_and_aoi_can_be_set_back_to_a_number(self, client, admin_headers):
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": None, "viz_max_aoi_km2": None},
+            headers=admin_headers,
+        )
+        r = await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_grid_resolution": 80, "viz_max_aoi_km2": 250},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["viz_max_grid_resolution"] == 80
+        assert r.json()["viz_max_aoi_km2"] == 250
+
+    async def test_spatial_rejects_date_range_above_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_aoi_km2": 1_000_000, "viz_max_date_range_days_spatial": 30},
+            headers=admin_headers,
+        )
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": _PARAM,
+                "method": "idw",
+                "grid_resolution": 5,
+                "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
+                "date_from": "2024-01-01",
+                "date_to": "2024-12-31",
+            },
+        )
+        assert r.status_code == 422
+        assert "date range" in r.json()["error"]["message"].lower()
+
+    async def test_timeseries_respects_its_own_configured_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_date_range_days_timeseries": 30},
+            headers=admin_headers,
+        )
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"parameter": _PARAM, "date_from": "2024-01-01", "date_to": "2024-12-31"},
+        )
+        assert r.status_code == 422
+        assert "date range" in r.json()["error"]["message"].lower()
+
+    async def test_comparison_and_statistics_unaffected_by_timeseries_limit(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_date_range_days_timeseries": 30},
+            headers=admin_headers,
+        )
+        # comparison/statistics have their own (still-unlimited-by-default)
+        # limits, independent of timeseries' now-lowered one.
+        r_comparison = await client.post(
+            "/api/v1/visualize/comparison",
+            json={
+                "parameters": [_PARAM, "Salinity"],
+                "date_from": "2024-01-01",
+                "date_to": "2024-12-31",
+            },
+        )
+        assert r_comparison.status_code == 200, r_comparison.text
+
+        r_statistics = await client.post(
+            "/api/v1/visualize/statistics",
+            json={"parameter": _PARAM, "date_from": "2024-01-01", "date_to": "2024-12-31"},
+        )
+        assert r_statistics.status_code == 200, r_statistics.text
+
+    async def test_none_limit_means_unlimited(self, client, admin_headers):
+        await _seed_timeseries_fixture()
+        # Explicitly confirm the default None (unlimited) for timeseries
+        # allows a wide date range with no rejection.
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"parameter": _PARAM, "date_from": "2000-01-01", "date_to": "2024-12-31"},
+        )
+        assert r.status_code == 200, r.text

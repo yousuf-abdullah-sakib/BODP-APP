@@ -2,7 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import SiteSettings
-from app.schemas.visualize import VizExportSettingsUpdate
+from app.schemas.visualize import VizComputeLimitsUpdate, VizExportSettingsUpdate
 
 # SiteSettings is a singleton row (id=1, per the model's own default) with
 # no provisioning step anywhere in the app yet — this is the first real
@@ -21,9 +21,16 @@ async def get_settings(db: AsyncSession) -> SiteSettings:
     return settings
 
 
-async def update_settings(db: AsyncSession, data: VizExportSettingsUpdate) -> SiteSettings:
+async def update_settings(
+    db: AsyncSession, data: VizExportSettingsUpdate | VizComputeLimitsUpdate
+) -> SiteSettings:
     settings = await get_settings(db)
-    for field, value in data.model_dump(exclude_none=True).items():
+    # exclude_unset (not exclude_none) — the compute-limit date-range
+    # fields are meaningfully nullable ("unlimited"), so a PATCH body must
+    # be able to explicitly set one back to null. exclude_unset applies
+    # exactly the fields present in the request body, whether their value
+    # is null or not, leaving omitted fields untouched either way.
+    for field, value in data.model_dump(exclude_unset=True).items():
         setattr(settings, field, value)
     await db.commit()
     await db.refresh(settings)

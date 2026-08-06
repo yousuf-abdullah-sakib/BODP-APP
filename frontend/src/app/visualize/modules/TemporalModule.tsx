@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import PlotlyChart from "@/components/charts/PlotlyChart";
 import ChartToolbar, { useChartControls } from "@/components/charts/ChartToolbar";
 import { useFullscreenChart, FullscreenOverlay } from "@/components/charts/FullscreenChartWrapper";
+import { ApiError } from "@/lib/api/client";
 import { postTimeseries } from "@/lib/api/visualize";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
@@ -62,8 +63,8 @@ export default function TemporalModule({
       .then((res) => {
         if (!cancelled) setData(res);
       })
-      .catch(() => {
-        if (!cancelled) setError("Failed to load time series data.");
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof ApiError ? err.message : "Failed to load time series data.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

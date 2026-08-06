@@ -183,6 +183,15 @@ export interface VizExportSettings {
   viz_export_statistics_enabled: boolean;
 }
 
+export interface VizComputeLimits {
+  viz_max_grid_resolution: number | null;
+  viz_max_aoi_km2: number | null;
+  viz_max_date_range_days_spatial: number | null;
+  viz_max_date_range_days_timeseries: number | null;
+  viz_max_date_range_days_comparison: number | null;
+  viz_max_date_range_days_statistics: number | null;
+}
+
 export interface BoundaryShapefileSummary {
   id: string;
   name: string;

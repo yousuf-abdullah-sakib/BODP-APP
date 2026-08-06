@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import uuid
 from calendar import month_abbr
 from collections import defaultdict
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
+from app.models.admin import SiteSettings
 from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, Station
 from app.models.visualize import VisualizationJob, VizJobStatus
 from app.schemas.visualize import (
@@ -41,6 +43,7 @@ from app.schemas.visualize import (
     TimeSeriesStats,
     VizFilterParams,
 )
+from app.services import settings_service
 
 _CACHE_TTL_SECONDS = 300
 
@@ -87,6 +90,67 @@ def _apply_viz_filters(query, f: VizFilterParams):
         envelope = func.ST_MakeEnvelope(f.lon_min, f.lat_min, f.lon_max, f.lat_max, 4326)
         query = query.where(func.ST_Intersects(DatasetRecord.geom, envelope))
     return query
+
+
+# --- Admin-configurable compute limits ---
+#
+# Guards against oversized /visualize/* requests that could exhaust
+# worker memory/CPU: interpolation grid size, AOI (bounding box) area,
+# and date-range span. All three are read from SiteSettings (admin-
+# editable via /admin/settings/visualization-limits) rather than
+# hardcoded, so an admin can raise/lower them without a deploy.
+
+_EARTH_RADIUS_KM = 6371.0
+
+
+def _bbox_area_km2(lat_min: float, lat_max: float, lon_min: float, lon_max: float) -> float:
+    """Approximate area of a lat/lon rectangle in km², via a flat-earth
+    approximation scaled by cos(mean latitude) for the east-west side —
+    accurate to well within the margin needed for a soft admin limit at
+    these scales (hundreds to low-thousands of km²), no geospatial
+    dependency needed beyond stdlib math."""
+    lat_span_km = (lat_max - lat_min) * (math.pi / 180.0) * _EARTH_RADIUS_KM
+    mean_lat_rad = math.radians((lat_min + lat_max) / 2.0)
+    lon_span_km = (lon_max - lon_min) * (math.pi / 180.0) * _EARTH_RADIUS_KM * math.cos(mean_lat_rad)
+    return abs(lat_span_km * lon_span_km)
+
+
+def _check_date_range_limit(
+    settings_row: SiteSettings, f: VizFilterParams, *, max_days: int | None
+) -> None:
+    if max_days is None or f.date_from is None or f.date_to is None:
+        return
+    span_days = (f.date_to - f.date_from).days
+    if span_days > max_days:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Requested date range ({span_days} days) exceeds the configured maximum "
+            f"of {max_days} days for this module. Narrow the date range and try again.",
+        )
+
+
+def _check_spatial_limits(settings_row: SiteSettings, params: SpatialRequest) -> None:
+    max_resolution = settings_row.viz_max_grid_resolution
+    if max_resolution is not None and params.grid_resolution > max_resolution:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Requested grid resolution ({params.grid_resolution}) exceeds the "
+            f"configured maximum of {max_resolution}.",
+        )
+
+    max_aoi_km2 = settings_row.viz_max_aoi_km2
+    if max_aoi_km2 is not None:
+        area_km2 = _bbox_area_km2(
+            params.bounds.lat_min, params.bounds.lat_max, params.bounds.lon_min, params.bounds.lon_max
+        )
+        if area_km2 > max_aoi_km2:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Requested area of interest (~{area_km2:.0f} km²) exceeds the configured "
+                f"maximum of {max_aoi_km2:.0f} km². Draw a smaller area and try again.",
+            )
+
+    _check_date_range_limit(settings_row, params, max_days=settings_row.viz_max_date_range_days_spatial)
 
 
 # --- Shared math helpers (ported 1:1 from bodp-frontend/src/lib/mock-data/stats.ts) ---
@@ -147,6 +211,11 @@ def _resolution_trunc(resolution: str):
 
 
 async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSeriesResponse:
+    settings_row = await settings_service.get_settings(db)
+    _check_date_range_limit(
+        settings_row, params, max_days=settings_row.viz_max_date_range_days_timeseries
+    )
+
     cache_key = _cache_key("timeseries", params)
     cached = await cache_get_json(cache_key)
     if cached is not None:
@@ -303,6 +372,12 @@ async def create_spatial_request(db: AsyncSession, params: SpatialRequest) -> Sp
     """Decides sync-vs-Celery-job the same way extraction_service.create_extraction
     does for extractions — light requests (few points, small grid) compute
     in-process; heavy ones dispatch to Celery (Master Plan §3 Phase 7 task 2)."""
+    settings_row = await settings_service.get_settings(db)
+    # A correctness gate, not a performance heuristic — runs before the
+    # sync/async work-unit decision so an oversized request is rejected
+    # regardless of which path it would otherwise take.
+    _check_spatial_limits(settings_row, params)
+
     points = await get_spatial_points(db, params)
     # Work scales with grid cells × source points (every point contributes
     # to every cell in IDW/NN) — this product is the real cost driver, not
@@ -344,6 +419,11 @@ async def get_spatial_job(db: AsyncSession, job_id: uuid.UUID) -> VisualizationJ
 
 
 async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> ComparisonResponse:
+    settings_row = await settings_service.get_settings(db)
+    _check_date_range_limit(
+        settings_row, params, max_days=settings_row.viz_max_date_range_days_comparison
+    )
+
     cache_key = _cache_key("comparison", params)
     cached = await cache_get_json(cache_key)
     if cached is not None:
@@ -423,6 +503,11 @@ def _linreg_xy(xs: list[float], ys: list[float]) -> tuple[float, float]:
 
 
 async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> StatisticsResponse:
+    settings_row = await settings_service.get_settings(db)
+    _check_date_range_limit(
+        settings_row, params, max_days=settings_row.viz_max_date_range_days_statistics
+    )
+
     cache_key = _cache_key("statistics", params)
     cached = await cache_get_json(cache_key)
     if cached is not None:

@@ -244,3 +244,34 @@ class VizExportSettingsUpdate(BaseModel):
     viz_export_spatial_enabled: bool | None = None
     viz_export_comparison_enabled: bool | None = None
     viz_export_statistics_enabled: bool | None = None
+
+
+# --- Visualization compute limits (admin) ---
+#
+# Guards against oversized /visualize/* requests (huge interpolation grid,
+# huge AOI, huge date range) that could otherwise exhaust worker memory/
+# CPU. Every limit is independently nullable, and null uniformly means
+# "unlimited" for that specific limit — an admin can raise, lower, or
+# fully disable each of the 6 limits from the database with no code
+# change (Master Plan-adjacent follow-up: "make all visualization limits
+# fully configurable, including Unlimited, for every limit").
+
+
+class VizComputeLimitsSchema(BaseModel):
+    viz_max_grid_resolution: int | None = 100
+    viz_max_aoi_km2: float | None = 500.0
+    viz_max_date_range_days_spatial: int | None = 3650
+    viz_max_date_range_days_timeseries: int | None = None
+    viz_max_date_range_days_comparison: int | None = None
+    viz_max_date_range_days_statistics: int | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class VizComputeLimitsUpdate(BaseModel):
+    viz_max_grid_resolution: int | None = Field(default=None, ge=5, le=500)
+    viz_max_aoi_km2: float | None = Field(default=None, gt=0)
+    viz_max_date_range_days_spatial: int | None = Field(default=None, gt=0)
+    viz_max_date_range_days_timeseries: int | None = Field(default=None, gt=0)
+    viz_max_date_range_days_comparison: int | None = Field(default=None, gt=0)
+    viz_max_date_range_days_statistics: int | None = Field(default=None, gt=0)

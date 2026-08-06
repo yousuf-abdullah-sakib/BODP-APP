@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import ARRAY, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import ARRAY, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -154,6 +154,22 @@ class SiteSettings(Base):
     viz_export_spatial_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     viz_export_comparison_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     viz_export_statistics_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # Admin-configurable compute limits for /visualize/* — guards against
+    # oversized requests (huge grid, huge AOI, huge date range) that could
+    # otherwise exhaust worker memory/CPU. Resolution and AOI area are
+    # inherently spatial-only concepts (one column each); date range is
+    # capped per-module since spatial interpolation is far more expensive
+    # per-day-of-data than a simple aggregation query. Every one of these
+    # 6 columns is nullable, and None uniformly means "unlimited" for that
+    # specific limit — the admin can raise, lower, or fully disable each
+    # one independently, entirely from the database, with no code change.
+    viz_max_grid_resolution: Mapped[int | None] = mapped_column(Integer, default=100)
+    viz_max_aoi_km2: Mapped[float | None] = mapped_column(Float, default=500.0)
+    viz_max_date_range_days_spatial: Mapped[int | None] = mapped_column(Integer, default=3650)
+    viz_max_date_range_days_timeseries: Mapped[int | None] = mapped_column(Integer)
+    viz_max_date_range_days_comparison: Mapped[int | None] = mapped_column(Integer)
+    viz_max_date_range_days_statistics: Mapped[int | None] = mapped_column(Integer)
 
 
 class BoundaryShapefile(UUIDPKMixin, Base):

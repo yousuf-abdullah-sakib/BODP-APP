@@ -11,6 +11,7 @@ import { equalIntervalBreaks, type ColorRampName, type InterpolationDisplayMode 
 import type { InterpolationOutput, BaseMapName, GisMapApi } from "@/components/map/GisSpatialMap";
 import type { SpatialAOI } from "@/lib/geo/spatialAoi";
 import { useToast } from "@/context/ToastContext";
+import { ApiError } from "@/lib/api/client";
 import { postSpatial, getSpatialJob } from "@/lib/api/visualize";
 import { getDefaultBoundary } from "@/lib/api/boundary";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
@@ -178,9 +179,9 @@ export function useSpatialMapping({ parameter, filteredStations, aoi, filters }:
           }
         }
         await poll();
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          setError("Failed to load spatial data.");
+          setError(err instanceof ApiError ? err.message : "Failed to load spatial data.");
           setLoading(false);
         }
       }

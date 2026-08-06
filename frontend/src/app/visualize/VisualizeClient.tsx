@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { getCatalogTaxonomy } from "@/lib/api/catalog";
 import type { TaxonomyOptions } from "@/lib/types/catalog";
 import { useVizFilters } from "./useVizFilters";
+import { useVizComputeLimits } from "./useVizComputeLimits";
 import TemporalModule from "./modules/TemporalModule";
 import { useSpatialMapping } from "./modules/SpatialMappingModule";
 import ComparisonModule from "./modules/ComparisonModule";
 import StatisticsModule from "./modules/StatisticsModule";
 import { boundsOf, type SpatialAOI } from "@/lib/geo/spatialAoi";
+import { bboxAreaKm2 } from "@/lib/geo/bboxArea";
 
 const SpatialFilterMap = dynamic(() => import("@/components/map/SpatialFilterMap"), {
   ssr: false,
@@ -47,6 +49,7 @@ function FilterGroup({ title, icon, defaultOpen = true, children }: { title: str
 export default function VisualizeClient() {
   const [module, setModule] = useState<ModuleKey>("temporal");
   const { filters, update, resetFilters, filteredStations, activeCount } = useVizFilters();
+  const limits = useVizComputeLimits();
   const [showTrend, setShowTrend] = useState(true);
   const [showMA, setShowMA] = useState(true);
   const [aoiClearSignal, setAoiClearSignal] = useState(0);
@@ -60,6 +63,45 @@ export default function VisualizeClient() {
   }, []);
 
   const availableParams = taxonomy?.parameters ?? [];
+
+  // Live AOI area feedback — only meaningful for the Spatial module, since
+  // AOI area is a spatial-only limit. Warn-only: the AOI is never silently
+  // cropped or modified here, actual enforcement is the backend 422.
+  const aoiAreaKm2 = useMemo(() => {
+    if (filters.latMin === "" || filters.latMax === "" || filters.lonMin === "" || filters.lonMax === "") {
+      return null;
+    }
+    return bboxAreaKm2({
+      latMin: Number(filters.latMin),
+      latMax: Number(filters.latMax),
+      lonMin: Number(filters.lonMin),
+      lonMax: Number(filters.lonMax),
+    });
+  }, [filters.latMin, filters.latMax, filters.lonMin, filters.lonMax]);
+  const aoiOverLimit =
+    module === "spatial" &&
+    aoiAreaKm2 !== null &&
+    limits.viz_max_aoi_km2 !== null &&
+    aoiAreaKm2 > limits.viz_max_aoi_km2;
+
+  // Live date-range feedback, checked against whichever module is active.
+  const dateRangeDays = useMemo(() => {
+    if (!filters.dateFrom || !filters.dateTo) return null;
+    const from = new Date(filters.dateFrom).getTime();
+    const to = new Date(filters.dateTo).getTime();
+    if (Number.isNaN(from) || Number.isNaN(to)) return null;
+    return Math.round((to - from) / (1000 * 60 * 60 * 24));
+  }, [filters.dateFrom, filters.dateTo]);
+  const maxDateRangeDaysForModule: number | null =
+    module === "spatial"
+      ? limits.viz_max_date_range_days_spatial
+      : module === "temporal"
+        ? limits.viz_max_date_range_days_timeseries
+        : module === "comparison"
+          ? limits.viz_max_date_range_days_comparison
+          : limits.viz_max_date_range_days_statistics;
+  const dateRangeOverLimit =
+    dateRangeDays !== null && maxDateRangeDaysForModule !== null && dateRangeDays > maxDateRangeDaysForModule;
 
   function handleAoiChange(next: SpatialAOI | null) {
     setAoi(next);
@@ -175,6 +217,13 @@ export default function VisualizeClient() {
                 <option value="annual">Annual</option>
               </select>
             </div>
+            {dateRangeOverLimit && (
+              <p className="gis-caption" style={{ color: "var(--yellow)", marginBottom: 0 }}>
+                ⚠ Selected range ({dateRangeDays} days) exceeds this module&apos;s configured
+                maximum of {maxDateRangeDaysForModule} days — the request will be rejected.
+                Narrow the range before submitting.
+              </p>
+            )}
           </FilterGroup>
 
           <FilterGroup title="Area of Interest (AOI)" icon="🌍" defaultOpen={false}>
@@ -201,6 +250,16 @@ export default function VisualizeClient() {
                   "No area selected — showing all locations"
                 )}
               </div>
+              {aoiAreaKm2 !== null && (
+                <div
+                  className="map-filter-info"
+                  style={aoiOverLimit ? { color: "var(--yellow)" } : undefined}
+                >
+                  {aoiOverLimit ? "⚠ " : ""}Approx. area: ~{aoiAreaKm2.toFixed(0)} km²
+                  {module === "spatial" && limits.viz_max_aoi_km2 !== null && ` (max ${limits.viz_max_aoi_km2.toFixed(0)} km² for Spatial Mapping)`}
+                  {aoiOverLimit && " — this AOI is too large; interpolation requests will be rejected."}
+                </div>
+              )}
             </div>
             <div className="ctrl-group">
               <label className="ctrl-label">Latitude Range (°)</label>

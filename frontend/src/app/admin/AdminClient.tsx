@@ -6,6 +6,7 @@ import { getAdminRequests } from "@/lib/api/admin-requests";
 import AdminRequestsSection from "./sections/AdminRequestsSection";
 import GrantsSection from "./sections/GrantsSection";
 import VisualizationExportsSection from "./sections/VisualizationExportsSection";
+import VisualizationLimitsSection from "./sections/VisualizationLimitsSection";
 import DataVisualizationSection from "./sections/DataVisualizationSection";
 
 export default function AdminClient() {
@@ -31,6 +32,7 @@ export default function AdminClient() {
       title: "Visualization",
       items: [
         { key: "viz-exports", label: "Export Settings", icon: "📤" },
+        { key: "viz-limits", label: "Compute Limits", icon: "⚡" },
         { key: "viz-boundary", label: "Boundary Shapefile", icon: "🗺️" },
       ],
     },
@@ -43,6 +45,7 @@ export default function AdminClient() {
       )}
       {active === "grants" && <GrantsSection />}
       {active === "viz-exports" && <VisualizationExportsSection />}
+      {active === "viz-limits" && <VisualizationLimitsSection />}
       {active === "viz-boundary" && <DataVisualizationSection />}
     </DashboardShell>
   );

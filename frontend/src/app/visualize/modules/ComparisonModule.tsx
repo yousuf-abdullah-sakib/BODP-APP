@@ -5,6 +5,7 @@ import PlotlyChart from "@/components/charts/PlotlyChart";
 import ChartToolbar, { useChartControls } from "@/components/charts/ChartToolbar";
 import { useFullscreenChart, FullscreenOverlay } from "@/components/charts/FullscreenChartWrapper";
 import type { ColorRampName } from "@/lib/geo/colorRamp";
+import { ApiError } from "@/lib/api/client";
 import { postComparison } from "@/lib/api/visualize";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
@@ -45,8 +46,8 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
       .then((res) => {
         if (!cancelled) setScatterData2(res);
       })
-      .catch(() => {
-        if (!cancelled) setError("Failed to load comparison data.");
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof ApiError ? err.message : "Failed to load comparison data.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
