@@ -19,6 +19,7 @@ def _vps_backend() -> S3CompatibleBackend:
         secret_key=settings.STORAGE_VPS_SECRET_KEY,
         region=settings.STORAGE_VPS_REGION,
         name="vps_minio",
+        public_endpoint_url=settings.STORAGE_VPS_PUBLIC_ENDPOINT_URL,
     )
 
 
@@ -39,6 +40,7 @@ def _cloud_backend() -> S3CompatibleBackend:
         secret_key=settings.STORAGE_CLOUD_SECRET_KEY,
         region=settings.STORAGE_CLOUD_REGION,
         name="cloud",
+        public_endpoint_url=settings.STORAGE_CLOUD_PUBLIC_ENDPOINT_URL,
     )
 
 

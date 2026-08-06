@@ -38,17 +38,23 @@ same reasoning).
 
 ## Running tests
 
-Tests run against a real Postgres+PostGIS, not mocks — spin up a disposable
-instance separate from the dev compose stack so test runs don't interfere
-with data you're manually poking at:
+**Never run pytest against the `docker-compose.yml` dev stack's database —
+see [`../docs/TESTING.md`](../docs/TESTING.md) for the full policy and why
+it matters.** Tests run against a real Postgres+PostGIS, not mocks, and the
+suite truncates every table before every test — safe against a disposable
+instance, destructive against the dev stack's real data. A guard in
+`tests/conftest.py` refuses to run (`SystemExit(1)`) if it detects
+`DATABASE_URL`/`REDIS_URL` pointing at the dev stack's `postgres`/`redis`
+service hostnames, but don't rely on the guard — point pytest at a
+disposable instance in the first place:
 
 ```bash
 docker run -d --name bodp_pytest_postgres -e POSTGRES_USER=bodp \
-  -e POSTGRES_PASSWORD=bodp -e POSTGRES_DB=bodp -p 55433:5432 postgis/postgis:17-3.5
+  -e POSTGRES_PASSWORD=bodp -e POSTGRES_DB=bodp -p 55434:5432 postgis/postgis:17-3.5
 docker run -d --name bodp_pytest_redis -p 56380:6379 redis:7-alpine
 ```
 
-Point `.env`'s `DATABASE_URL`/`DATABASE_URL_SYNC` at port 55433 and
+Point `.env`'s `DATABASE_URL`/`DATABASE_URL_SYNC` at port 55434 and
 `REDIS_URL`/`CELERY_*` at port 56380, then:
 
 ```bash

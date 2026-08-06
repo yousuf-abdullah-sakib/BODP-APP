@@ -22,7 +22,8 @@ doesn't resolve, ask before proceeding rather than guessing.
 | Decision | Choice | Why |
 |---|---|---|
 | Backend framework | **FastAPI** (Python) | Async-native, fits I/O-bound workload (presigned URLs, job polling, streaming), same scientific Python stack (xarray/scipy/netCDF4/h5py) either way. Matches original architecture doc. |
-| Frontend framework | **Next.js 16 / React 19** | Already a working prototype; rebuild UI logic against real APIs, keep the design system, layouts, and component structure. |
+| Frontend framework | **Next.js 16 / React 19**, new project at `frontend/` | Same stack as the prototype (proven fit — Leaflet for GIS, Plotly for scientific charts). Built as a **new, clean project**, not an in-place edit of `bodp-frontend/` — code/components are reused from the prototype where they're solid, redesigned where outdated/inconsistent, but the target is production-quality structure, not preservation of the old codebase. |
+| Frontend delivery timing | **Progressive, alongside the backend, Phases 3–9** (revised from initial plan) | Each phase ships its frontend slice together with its backend, fully functional, rather than deferring all UI to one later phase. `bodp-frontend/` remains on disk untouched, read-only, as the UI/UX/workflow reference — never written to. |
 | Database | **PostgreSQL + PostGIS** | Spatial queries (bbox/polygon intersection against dataset extents) are core to catalog search and visualization. |
 | Object storage | **S3-compatible API** (MinIO on VPS now; AWS S3 / Backblaze B2 / Cloudflare R2 / Wasabi later) | Provider undecided — storage service is built against the S3 API so the backend never changes when the provider does. |
 | Background jobs | **Celery + Redis** | Heavy jobs (subset extraction, interpolation, NetCDF/.mat parsing, email) run async; light requests stay synchronous. |
@@ -42,6 +43,15 @@ backend is abstracted behind one service interface so VPS-local and
 cloud-tier files are indistinguishable to the rest of the system. This is
 what makes the "10–20TB across two storage locations, presented as one
 system" requirement achievable.
+
+**Non-negotiable testing rule:** the backend test suite truncates every
+table before every test. It must only ever run against a disposable,
+isolated database — **never** the `docker-compose.yml` dev stack's
+Postgres/Redis, which backs the running application and any manually
+seeded/uploaded data. A fail-fast guard in `backend/tests/conftest.py`
+aborts the suite if it detects the dev stack's database, but the guard is a
+backstop, not a substitute for targeting the right database. Full policy:
+[`docs/TESTING.md`](docs/TESTING.md).
 
 ---
 
@@ -180,7 +190,7 @@ later phase depends on.
 
 ---
 
-### Phase 3 — Dataset catalog (public-facing, read side)
+### Phase 3 — Dataset catalog (public-facing, read side) ✅ COMPLETE
 
 **Objective:** rebuild `/catalog` and `/catalog/[id]` against real data and real PostGIS-backed search.
 
@@ -202,7 +212,7 @@ later phase depends on.
 
 ---
 
-### Phase 4 — Request → approval → grant lifecycle
+### Phase 4 — Request → approval → grant lifecycle ✅ COMPLETE
 
 **Objective:** the core workflow the whole platform is built around — implemented end-to-end for the first time (the prototype never actually connected these two sides).
 
@@ -228,7 +238,7 @@ later phase depends on.
 
 ---
 
-### Phase 5 — Subset extraction & secure download delivery
+### Phase 5 — Subset extraction & secure download delivery ✅ COMPLETE
 
 **Objective:** turn an approved grant into an actual downloadable file, generated on demand from the real data, not the raw original.
 

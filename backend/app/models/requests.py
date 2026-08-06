@@ -12,6 +12,7 @@ from app.models.mixins import TimestampMixin, UUIDPKMixin
 
 if TYPE_CHECKING:
     from app.models.catalog import Dataset
+    from app.models.user import User
 
 
 class RequestStatus(StrEnum):
@@ -63,6 +64,7 @@ class DatasetRequest(UUIDPKMixin, Base):
     admin_note: Mapped[str | None] = mapped_column(Text)
 
     dataset: Mapped["Dataset"] = relationship()
+    user: Mapped["User"] = relationship(foreign_keys="DatasetRequest.user_id")
     grants: Mapped[list["AccessGrant"]] = relationship(back_populates="request")
 
 
@@ -92,6 +94,7 @@ class AccessGrant(UUIDPKMixin, Base):
     scope: Mapped[dict | None] = mapped_column(JSONB)
 
     dataset: Mapped["Dataset"] = relationship()
+    user: Mapped["User"] = relationship(foreign_keys="AccessGrant.user_id")
     request: Mapped["DatasetRequest | None"] = relationship(back_populates="grants")
     extractions: Mapped[list["SubsetExtraction"]] = relationship(back_populates="grant")
 
@@ -100,11 +103,12 @@ class SubsetExtraction(UUIDPKMixin, Base):
     __tablename__ = "subset_extractions"
 
     grant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("access_grants.id", ondelete="CASCADE"), nullable=False
+        UUID(as_uuid=True), ForeignKey("access_grants.id", ondelete="CASCADE"), nullable=False, index=True
     )
     requested_scope: Mapped[dict | None] = mapped_column(JSONB)
+    format: Mapped[str | None] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(
-        String(20), nullable=False, default=ExtractionStatus.QUEUED.value
+        String(20), nullable=False, default=ExtractionStatus.QUEUED.value, index=True
     )
     output_storage_backend: Mapped[str | None] = mapped_column(String(20))
     output_bucket: Mapped[str | None] = mapped_column(String(255))

@@ -31,6 +31,7 @@ class S3CompatibleBackend(StorageService):
         secret_key: str,
         region: str = "us-east-1",
         name: str = "s3",
+        public_endpoint_url: str | None = None,
     ):
         self._name = name
         self._client = boto3.client(
@@ -40,6 +41,26 @@ class S3CompatibleBackend(StorageService):
             aws_secret_access_key=secret_key,
             region_name=region,
             config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+        # Presigned URLs are followed directly by an external client (a
+        # browser, curl) — never routed through the backend — so they must
+        # be built against the endpoint that's actually reachable from
+        # outside the Docker network, which differs from the internal
+        # endpoint_url the backend/worker containers use for their own
+        # get/put calls (e.g. "minio:9000" internally vs. a public
+        # host/domain for MinIO's published port, or the same value in a
+        # real single-endpoint S3/R2/B2 production deployment).
+        self._presign_client = (
+            boto3.client(
+                "s3",
+                endpoint_url=public_endpoint_url,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                region_name=region,
+                config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+            )
+            if public_endpoint_url and public_endpoint_url != endpoint_url
+            else self._client
         )
 
     def put(
@@ -80,7 +101,7 @@ class S3CompatibleBackend(StorageService):
 
     def presign_get(self, bucket: str, key: str, *, expires_in_seconds: int = 3600) -> str:
         try:
-            return self._client.generate_presigned_url(
+            return self._presign_client.generate_presigned_url(
                 "get_object",
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_in_seconds,
@@ -90,7 +111,7 @@ class S3CompatibleBackend(StorageService):
 
     def presign_put(self, bucket: str, key: str, *, expires_in_seconds: int = 3600) -> str:
         try:
-            return self._client.generate_presigned_url(
+            return self._presign_client.generate_presigned_url(
                 "put_object",
                 Params={"Bucket": bucket, "Key": key},
                 ExpiresIn=expires_in_seconds,

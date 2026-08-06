@@ -1,14 +1,68 @@
+import sys
+
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import get_redis
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
 from app.core.limiter import limiter
 from app.core.security import create_email_verification_token
 from app.main import app
 from app.models.user import Role, User, UserRole
 from app.worker.celery_app import celery_app
+
+# --- Guard: refuse to run against the shared docker-compose dev stack ---
+#
+# This suite truncates every table before EVERY test (see _reset_database
+# below) and flushes Redis before every test (see _flush_cache). That is
+# correct and safe against a disposable, test-only database — but on
+# 2026-08-05 running `docker compose exec backend pytest` wiped the shared
+# dev stack's seeded catalog data and in-progress manual test fixtures,
+# because that container's DATABASE_URL/REDIS_URL point at the same Postgres
+# and Redis the dev stack (and any human using it) depends on.
+#
+# docker-compose.yml's `backend`/`celery-worker`/`celery-beat` services are
+# the only place DATABASE_URL resolves to the literal Docker Compose service
+# hostname "postgres" (see docker-compose.yml's x-backend-env anchor) — no
+# legitimate pytest target (bare-metal against backend/.env, the isolated
+# dev containers on localhost:55434, or CI) ever resolves to that hostname.
+# So this hostname check is a precise, non-heuristic way to detect "pytest
+# is about to run inside the shared dev stack" and abort before any fixture
+# — including this file's own autouse ones — gets a chance to touch data.
+# See docs/TESTING.md for the full policy this enforces.
+_FORBIDDEN_DB_HOSTS = {"postgres"}
+_FORBIDDEN_REDIS_HOSTS = {"redis"}
+
+
+def _abort_if_dev_stack_database() -> None:
+    # PostgresDsn is a MultiHostUrl in pydantic v2 (supports replica-set
+    # style DSNs) — `.host` isn't available, only `.hosts()`, a list.
+    # RedisDsn is a plain single-host Url and exposes `.host` directly.
+    db_hosts = settings.DATABASE_URL.hosts()
+    db_host = db_hosts[0]["host"] if db_hosts else None
+    redis_host = settings.REDIS_URL.host
+    if db_host in _FORBIDDEN_DB_HOSTS or redis_host in _FORBIDDEN_REDIS_HOSTS:
+        sys.stderr.write(
+            "\n"
+            "REFUSING TO RUN: pytest is configured against the shared docker-compose\n"
+            f"dev stack (DATABASE_URL host={db_host!r}, REDIS_URL host={redis_host!r}).\n"
+            "This test suite truncates every table and flushes Redis before every\n"
+            "test — running it here would wipe real seeded/manually-created data.\n"
+            "\n"
+            "Run pytest against the isolated dev database instead:\n"
+            "  - Bare metal: `cd backend && pytest` (uses backend/.env, localhost:55434)\n"
+            "  - Container:  `docker compose run --rm backend pytest` with\n"
+            "    DATABASE_URL/REDIS_URL overridden to the isolated dev containers —\n"
+            "    never `docker compose exec backend pytest`.\n"
+            "See docs/TESTING.md for the full policy.\n"
+        )
+        raise SystemExit(1)
+
+
+_abort_if_dev_stack_database()
 
 # Rate limiting is a real, deliberate production behavior (Master Plan Phase 1
 # task 6) — but slowapi's default key_func treats every request from the test
@@ -33,6 +87,15 @@ async def _reset_database():
     async with engine.begin() as conn:
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(table.delete())
+    yield
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _flush_cache():
+    """Flushes the Redis cache before each test — catalog taxonomy (and any
+    future cached endpoint) must not leak state across tests that each seed
+    their own fresh data (Master Plan §3 Phase 3 task 6 caching)."""
+    await get_redis().flushdb()
     yield
 
 

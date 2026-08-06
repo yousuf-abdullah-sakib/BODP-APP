@@ -13,6 +13,12 @@ x-backend-env: &backend-env
   JWT_SECRET_KEY: ${JWT_SECRET_KEY:-dev-only-insecure-secret-change-in-production-min-32-chars}
   CORS_ORIGINS: '["http://localhost:3000"]'
   STORAGE_VPS_ENDPOINT_URL: http://minio:9000
+  # Presigned download URLs must be followed directly by a browser/curl, not
+  # routed through the Docker network — "minio:9000" only resolves inside
+  # it. localhost:9000 is MinIO's published host port (see minio service's
+  # ports: below); in a real deployment this would be the VPS's public
+  # domain/IP instead.
+  STORAGE_VPS_PUBLIC_ENDPOINT_URL: ${STORAGE_VPS_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
   STORAGE_VPS_ACCESS_KEY: ${MINIO_ROOT_USER:-bodp_minio_admin}
   STORAGE_VPS_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-bodp_minio_dev_secret}
   STORAGE_VPS_BUCKET: bodp-vps
@@ -123,6 +129,23 @@ services:
       redis:
         condition: service_healthy
     command: celery -A app.worker.celery_app beat --loglevel=info
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+      API_URL_INTERNAL: http://backend:8000/api/v1
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
 
 volumes:
   bodp_pgdata:

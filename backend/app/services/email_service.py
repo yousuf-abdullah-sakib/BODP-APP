@@ -64,6 +64,50 @@ class EmailService:
         """
         self.send(to, f"Reset your {settings.EMAIL_FROM_NAME} password", html)
 
+    def send_request_submitted_email(
+        self, to: str, *, admin_name: str, requester_name: str, dataset_title: str
+    ) -> None:
+        review_url = f"{settings.FRONTEND_URL}/admin"
+        html = f"""
+        <p>Hello {admin_name},</p>
+        <p><b>{requester_name}</b> requested access to <b>&ldquo;{dataset_title}&rdquo;</b>.</p>
+        <p><a href="{review_url}">Review this request</a></p>
+        """
+        self.send(to, f"New dataset access request — {dataset_title}", html)
+
+    def send_request_approved_email(self, to: str, *, full_name: str, dataset_title: str) -> None:
+        dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
+        html = f"""
+        <p>Hello {full_name},</p>
+        <p>Your access request for <b>&ldquo;{dataset_title}&rdquo;</b> has been approved.</p>
+        <p><a href="{dashboard_url}">View it in your dashboard</a></p>
+        """
+        self.send(to, f"Access approved — {dataset_title}", html)
+
+    def send_request_rejected_email(
+        self, to: str, *, full_name: str, dataset_title: str, reason: str
+    ) -> None:
+        dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
+        html = f"""
+        <p>Hello {full_name},</p>
+        <p>Your access request for <b>&ldquo;{dataset_title}&rdquo;</b> was not approved.</p>
+        <p><b>Reason:</b> {reason}</p>
+        <p>You may submit a new request from the <a href="{dashboard_url}">dataset catalog</a>
+        with adjusted scope or justification.</p>
+        """
+        self.send(to, f"Access request update — {dataset_title}", html)
+
+    def send_grant_expiring_email(
+        self, to: str, *, full_name: str, dataset_title: str, expires_at: str
+    ) -> None:
+        dashboard_url = f"{settings.FRONTEND_URL}/dashboard"
+        html = f"""
+        <p>Hello {full_name},</p>
+        <p>Your access to <b>&ldquo;{dataset_title}&rdquo;</b> expires on <b>{expires_at}</b>.</p>
+        <p>Visit your <a href="{dashboard_url}">dashboard</a> if you need continued access.</p>
+        """
+        self.send(to, f"Access expiring soon — {dataset_title}", html)
+
 
 def _strip_html(html: str) -> str:
     import re

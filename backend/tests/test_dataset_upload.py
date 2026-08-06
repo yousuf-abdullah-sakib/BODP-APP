@@ -134,6 +134,96 @@ class TestCsvUpload:
             assert "sea_surface_temp" in dataset.parameters
             assert "csv" in dataset.formats
 
+    async def test_upload_propagates_spatial_extent_to_dataset(self, client, admin_headers):
+        """dataset_files.spatial_extent is per-file; Phase 3's catalog detail
+        endpoint reads datasets.spatial_extent, so ingestion must union each
+        file's extent up onto the parent dataset, not leave it file-local."""
+        import uuid as uuid_module
+
+        from sqlalchemy import func, select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import Dataset
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("spatial_test.csv", _make_csv_bytes(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202
+
+        async with AsyncSessionLocal() as db:
+            dataset = await db.get(Dataset, uuid_module.UUID(dataset_id))
+            assert dataset.spatial_extent is not None
+
+            row = (
+                await db.execute(
+                    select(
+                        func.ST_XMin(dataset.spatial_extent),
+                        func.ST_XMax(dataset.spatial_extent),
+                        func.ST_YMin(dataset.spatial_extent),
+                        func.ST_YMax(dataset.spatial_extent),
+                    )
+                )
+            ).one()
+            lon_min, lon_max, lat_min, lat_max = row
+            # _make_csv_bytes(): lat = 22.0 + i*0.05, lon = 91.0 + i*0.05, i in [0, 14]
+            assert lat_min == pytest.approx(22.0, abs=1e-3)
+            assert lat_max == pytest.approx(22.7, abs=1e-3)
+            assert lon_min == pytest.approx(91.0, abs=1e-3)
+            assert lon_max == pytest.approx(91.7, abs=1e-3)
+
+    async def test_second_upload_unions_spatial_extent_without_error(self, client, admin_headers):
+        """Uploading a second file to a dataset that already has a
+        spatial_extent (whether from a prior upload or, as with the seed
+        script, a plain-WKT-string assignment outside the ORM's normal
+        geometry write path) must not raise — ST_Union needs both sides
+        explicitly cast to geometry, since the in-session Python value on
+        dataset.spatial_extent isn't guaranteed to already be WKB-typed."""
+        import uuid as uuid_module
+
+        from sqlalchemy import func, select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import Dataset
+
+        dataset_id = await _create_dataset(client, admin_headers)
+
+        # Simulate the seed script's plain-string assignment path (bypasses
+        # the upload endpoint's normal geometry write) to reproduce the
+        # exact condition that broke ST_Union before the cast fix.
+        async with AsyncSessionLocal() as db:
+            dataset = await db.get(Dataset, uuid_module.UUID(dataset_id))
+            dataset.spatial_extent = (
+                "SRID=4326;POLYGON((90.0 20.0, 92.0 20.0, 92.0 23.0, 90.0 23.0, 90.0 20.0))"
+            )
+            await db.commit()
+
+        files = {"file": ("second_upload.csv", _make_csv_bytes(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+
+        r2 = await client.get(f"/api/v1/admin/datasets/uploads/{r.json()['upload']['id']}", headers=admin_headers)
+        assert r2.json()["status"] == "complete", r2.text
+
+        async with AsyncSessionLocal() as db:
+            dataset = await db.get(Dataset, uuid_module.UUID(dataset_id))
+            row = (
+                await db.execute(
+                    select(
+                        func.ST_XMin(dataset.spatial_extent),
+                        func.ST_XMax(dataset.spatial_extent),
+                    )
+                )
+            ).one()
+            lon_min, lon_max = row
+            # Union of the pre-existing [90,92] extent and the new file's
+            # [91.0, 91.7] extent must cover both — envelope widens, not narrows.
+            assert lon_min <= 90.0 + 1e-3
+            assert lon_max >= 91.7 - 1e-3
+
     async def test_upload_to_nonexistent_dataset_404s(self, client, admin_headers):
         import uuid
 

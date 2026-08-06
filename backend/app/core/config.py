@@ -61,18 +61,31 @@ class Settings(BaseSettings):
 
     # --- Storage (S3-compatible; provider-agnostic per Master Plan) ---
     STORAGE_VPS_ENDPOINT_URL: str = "http://localhost:9000"
+    # Endpoint presigned URLs are built against — must be reachable from
+    # outside the Docker network (a browser, curl), unlike
+    # STORAGE_VPS_ENDPOINT_URL which the backend/worker use internally.
+    # Defaults to the internal endpoint so single-endpoint setups (real
+    # cloud S3/R2/B2 in production, or non-Docker local dev) need no extra
+    # config; only diverges in a Docker Compose dev/staging setup like this
+    # one's, where MinIO's internal service name isn't publicly routable.
+    STORAGE_VPS_PUBLIC_ENDPOINT_URL: str | None = None
     STORAGE_VPS_ACCESS_KEY: str = "bodp_minio_admin"
     STORAGE_VPS_SECRET_KEY: str = "CHANGE_ME_MINIO_SECRET"
     STORAGE_VPS_BUCKET: str = "bodp-vps"
     STORAGE_VPS_REGION: str = "us-east-1"
 
     STORAGE_CLOUD_ENDPOINT_URL: str | None = None
+    STORAGE_CLOUD_PUBLIC_ENDPOINT_URL: str | None = None
     STORAGE_CLOUD_ACCESS_KEY: str | None = None
     STORAGE_CLOUD_SECRET_KEY: str | None = None
     STORAGE_CLOUD_BUCKET: str | None = None
     STORAGE_CLOUD_REGION: str = "us-east-1"
 
     MAX_UPLOAD_SIZE_MB: int = 5000
+
+    # --- Subset extraction (Master Plan §3 Phase 5) ---
+    EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
+    EXTRACTION_SYNC_THRESHOLD_MB: int = 10
 
     # --- Email (SMTP-compatible transactional provider; swappable) ---
     SMTP_HOST: str = "localhost"

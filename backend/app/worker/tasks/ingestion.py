@@ -3,7 +3,8 @@ from datetime import date
 from pathlib import Path
 
 import structlog
-from sqlalchemy import select
+from geoalchemy2 import Geometry
+from sqlalchemy import cast, func, select
 
 from app.core.database import get_sync_db
 from app.models.catalog import Dataset, DatasetFile
@@ -172,6 +173,27 @@ def _run_ingestion(db, dataset_file: DatasetFile) -> dict:
         dataset.parameters = sorted(merged_params)
         if dataset_file.file_format and dataset_file.file_format not in (dataset.formats or []):
             dataset.formats = sorted(set(dataset.formats or []) | {dataset_file.file_format})
+        if dataset_file.spatial_extent is not None:
+            # Envelope of the union so the dataset-level bbox covers every
+            # file's extent, not just whichever file happened to land last.
+            # Both sides are cast to `geometry` explicitly — dataset.spatial_extent
+            # may hold a plain WKT string in-session (e.g. assigned by a seed
+            # script) rather than a WKBElement, and ST_Union has no
+            # geometry/varchar overload, so an implicit cast can't be relied on.
+            dataset.spatial_extent = (
+                db.scalar(
+                    select(
+                        func.ST_Envelope(
+                            func.ST_Union(
+                                cast(dataset.spatial_extent, Geometry),
+                                cast(dataset_file.spatial_extent, Geometry),
+                            )
+                        )
+                    )
+                )
+                if dataset.spatial_extent is not None
+                else dataset_file.spatial_extent
+            )
 
     db.commit()
 

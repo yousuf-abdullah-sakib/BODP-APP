@@ -145,6 +145,7 @@ class DatasetRecord(UUIDPKMixin, Base):
     processing_level: Mapped[str | None] = mapped_column(String(50))
     format: Mapped[str | None] = mapped_column(String(50))
     source: Mapped[str | None] = mapped_column(String(255))
+    platform: Mapped[str | None] = mapped_column(String(255))
     geom: Mapped[str | None] = mapped_column(
         Geometry(geometry_type="POINT", srid=4326, spatial_index=True)
     )
