@@ -64,8 +64,14 @@ class EmailService:
                 smtp.send_message(message)
             logger.info("email.sent", to=to, subject=subject)
         except Exception:
+            # Email delivery is best-effort, not a precondition for the
+            # caller's own action to succeed — registration/password-reset/
+            # invite already commit their DB state before calling send(), so
+            # a provider outage or bad credentials must not turn into a 500
+            # for the caller or leave that DB state half-finished. Logged
+            # with full detail (exc_info) for an admin to notice and fix the
+            # provider config; the caller gets on with its own response.
             logger.exception("email.send_failed", to=to, subject=subject)
-            raise
 
     def send_verification_email(self, to: str, full_name: str, token: str) -> None:
         verify_url = f"{settings.FRONTEND_URL}/verify-email?token={token}"
