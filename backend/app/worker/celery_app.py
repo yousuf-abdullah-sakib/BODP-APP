@@ -34,4 +34,10 @@ celery_app.conf.beat_schedule = {
         "task": "notifications.check_expiring_grants",
         "schedule": crontab(hour=6, minute=0),
     },
+    # Master Plan §3 Phase 6 task 3 — revoke grants once a user's 30-day
+    # account-deletion grace period elapses.
+    "process-pending-deletions-daily": {
+        "task": "notifications.process_pending_deletions",
+        "schedule": crontab(hour=6, minute=30),
+    },
 }

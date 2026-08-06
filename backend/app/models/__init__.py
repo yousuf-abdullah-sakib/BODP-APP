@@ -15,21 +15,24 @@ from app.models.catalog import (
     DatasetCategory,
     DatasetFile,
     DatasetRecord,
+    DatasetView,
     Station,
 )
 from app.models.notifications import Notification, SupportTicket
 from app.models.requests import AccessGrant, DatasetRequest, DownloadLog, SubsetExtraction
 from app.models.uploads import QualityIssue, Upload
-from app.models.user import Role, User, UserRole
+from app.models.user import Role, User, UserPreferences, UserRole
 
 __all__ = [
     "User",
+    "UserPreferences",
     "Role",
     "UserRole",
     "DatasetCategory",
     "Dataset",
     "DatasetFile",
     "DatasetRecord",
+    "DatasetView",
     "Station",
     "DatasetRequest",
     "AccessGrant",

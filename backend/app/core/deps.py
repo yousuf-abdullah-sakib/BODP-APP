@@ -55,7 +55,29 @@ async def get_current_user(
         )
 
     request.state.user = user
+    # The `sid` claim doubles as the caller's ActiveSession.id (see
+    # auth_service.issue_tokens) — stashed here so /me/sessions can flag
+    # "this is your current session" without re-decoding the token itself.
+    request.state.session_id = payload.get("sid")
     return user
+
+
+async def get_current_user_optional(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> User | None:
+    """Same as get_current_user but returns None instead of 401ing when no
+    (or an invalid) token is presented — for endpoints that serve both
+    anonymous and logged-in callers but behave differently for each, e.g.
+    catalog detail views only logging a DatasetView row when someone is
+    actually logged in."""
+    if credentials is None:
+        return None
+    try:
+        return await get_current_user(request, credentials, db)
+    except HTTPException:
+        return None
 
 
 def get_client_ip(request: Request) -> str | None:

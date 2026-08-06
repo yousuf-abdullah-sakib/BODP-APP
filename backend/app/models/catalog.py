@@ -1,9 +1,9 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 
 from geoalchemy2 import Geometry
-from sqlalchemy import ARRAY, BigInteger, Date, ForeignKey, Numeric, String, Text
+from sqlalchemy import ARRAY, BigInteger, Date, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -151,3 +151,23 @@ class DatasetRecord(UUIDPKMixin, Base):
     )
 
     dataset: Mapped["Dataset"] = relationship(back_populates="records")
+
+
+class DatasetView(UUIDPKMixin, Base):
+    """One row per dataset-detail-page view by a logged-in user — backs
+    Overview's real "datasets viewed" stat (Master Plan §3 Phase 6 task 1).
+    Anonymous views are not logged (no user_id to attribute them to).
+    No uniqueness constraint: every view is logged; "distinct datasets
+    viewed" is a COUNT(DISTINCT dataset_id) over this table, not a flag."""
+
+    __tablename__ = "dataset_views"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dataset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    viewed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )

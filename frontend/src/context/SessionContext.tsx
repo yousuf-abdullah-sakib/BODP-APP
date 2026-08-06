@@ -10,6 +10,7 @@ interface SessionContextValue {
   loading: boolean;
   login: (email: string, password: string) => Promise<SessionUser>;
   logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const SessionContext = createContext<SessionContextValue | undefined>(undefined);
@@ -74,8 +75,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    const token = window.localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) return;
+    const me = await fetchCurrentUser();
+    setUser(me);
+  }, []);
+
   return (
-    <SessionContext.Provider value={{ user, loading, login, logout }}>
+    <SessionContext.Provider value={{ user, loading, login, logout, refreshUser }}>
       {children}
     </SessionContext.Provider>
   );

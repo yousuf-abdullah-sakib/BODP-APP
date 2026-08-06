@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useSession } from "@/context/SessionContext";
 import { useConfirm } from "@/context/ConfirmContext";
 import { useTheme } from "@/context/ThemeContext";
+import { avatarUrl } from "@/lib/avatar";
 
 export interface DashNavItem {
   key: string;
@@ -76,6 +77,8 @@ export default function DashboardShell({
     .join("")
     .toUpperCase();
 
+  const avatarSrc = avatarUrl(user?.avatar_key);
+
   return (
     <div className="dash-shell">
       <button className="dash-mobile-toggle" onClick={() => setMobileOpen(true)}>
@@ -89,8 +92,8 @@ export default function DashboardShell({
         {isAdmin ? (
           <div className="dash-brand dash-brand-stacked">
             <div className="dash-brand-panel-label">BODP Admin Panel</div>
-            <div className={`dash-avatar admin${user?.avatar_key ? " has-image" : ""}`}>
-              {user?.avatar_key ? <img src={user.avatar_key} alt="" /> : initials}
+            <div className={`dash-avatar admin${avatarSrc ? " has-image" : ""}`}>
+              {avatarSrc ? <img src={avatarSrc} alt="" /> : initials}
             </div>
             <div className="dash-brand-role">Administrator</div>
           </div>
@@ -105,8 +108,8 @@ export default function DashboardShell({
             </div>
 
             <div className="dash-user">
-              <div className={`dash-avatar${user?.avatar_key ? " has-image" : ""}`}>
-                {user?.avatar_key ? <img src={user.avatar_key} alt="" /> : initials}
+              <div className={`dash-avatar${avatarSrc ? " has-image" : ""}`}>
+                {avatarSrc ? <img src={avatarSrc} alt="" /> : initials}
               </div>
               <div>
                 <div className="dash-user-name">{user?.full_name ?? "Guest"}</div>
@@ -169,8 +172,8 @@ export default function DashboardShell({
                 aria-haspopup="true"
                 aria-expanded={avatarMenuOpen}
               >
-                <div className={`tu-avatar${user?.avatar_key ? " has-image" : ""}`}>
-                  {user?.avatar_key ? <img src={user.avatar_key} alt="" /> : initials}
+                <div className={`tu-avatar${avatarSrc ? " has-image" : ""}`}>
+                  {avatarSrc ? <img src={avatarSrc} alt="" /> : initials}
                 </div>
                 <div>
                   <div className="tu-name">{isAdmin ? "Administrator" : (user?.full_name ?? "Guest")}</div>
@@ -180,7 +183,27 @@ export default function DashboardShell({
               </button>
               {avatarMenuOpen && (
                 <div className="dash-avatar-dropdown">
-                  <div className="dash-avatar-dropdown-sep" />
+                  {!isAdmin && (
+                    <>
+                      <button
+                        onClick={() => {
+                          onNavigate("profile");
+                          setAvatarMenuOpen(false);
+                        }}
+                      >
+                        👤 Profile
+                      </button>
+                      <button
+                        onClick={() => {
+                          onNavigate("preferences");
+                          setAvatarMenuOpen(false);
+                        }}
+                      >
+                        ⚙️ Preferences
+                      </button>
+                      <div className="dash-avatar-dropdown-sep" />
+                    </>
+                  )}
                   <button onClick={handleSignOut} className="danger">
                     ⏻ Sign Out
                   </button>

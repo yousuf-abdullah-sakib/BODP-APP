@@ -161,6 +161,13 @@ class AuthService:
         refresh_payload = decode_token(refresh_token, expected_type=TokenType.REFRESH)
         db.add(
             ActiveSession(
+                # Use the JWT `sid` claim as the row's own PK rather than
+                # letting UUIDPKMixin generate a random one — this is what
+                # lets /me/sessions correlate "which row is my current
+                # session" back to the sid claim on the caller's own access
+                # token (see core/deps.py's get_current_user, which stashes
+                # the decoded sid on request.state for exactly this).
+                id=uuid.UUID(session_id),
                 user_id=user.id,
                 refresh_token_jti=refresh_payload["jti"],
                 device=device,

@@ -108,6 +108,16 @@ class EmailService:
         """
         self.send(to, f"Access expiring soon — {dataset_title}", html)
 
+    def send_support_ticket_created_email(
+        self, to: str, *, subject: str, requester_name: str, requester_email: str, message: str
+    ) -> None:
+        html = f"""
+        <p>New support ticket from <b>{requester_name}</b> ({requester_email}):</p>
+        <p><b>Subject:</b> {subject}</p>
+        <p>{message}</p>
+        """
+        self.send(to, f"New support ticket — {subject}", html)
+
 
 def _strip_html(html: str) -> str:
     import re

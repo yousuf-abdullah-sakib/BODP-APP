@@ -159,3 +159,25 @@ class S3CompatibleBackend(StorageService):
             except ClientError as exc:
                 logger.exception("storage.ensure_bucket_failed", backend=self._name, bucket=bucket)
                 raise StorageBackendError(f"Failed to create bucket {bucket}") from exc
+
+    def set_public_prefix_policy(self, bucket: str, prefix: str) -> None:
+        import json
+
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {"AWS": ["*"]},
+                    "Action": ["s3:GetObject"],
+                    "Resource": [f"arn:aws:s3:::{bucket}/{prefix}*"],
+                }
+            ],
+        }
+        try:
+            self._client.put_bucket_policy(Bucket=bucket, Policy=json.dumps(policy))
+        except ClientError as exc:
+            logger.exception(
+                "storage.set_public_prefix_policy_failed", backend=self._name, bucket=bucket, prefix=prefix
+            )
+            raise StorageBackendError(f"Failed to set public policy on {bucket}/{prefix}") from exc

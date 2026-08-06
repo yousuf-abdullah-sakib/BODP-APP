@@ -6,7 +6,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.catalog import Dataset
+from app.core.deps import get_current_user_optional
+from app.models.catalog import Dataset, DatasetView
+from app.models.user import User
 from app.schemas.catalog import (
     CatalogSearchResponse,
     DatasetDetail,
@@ -88,12 +90,23 @@ async def catalog_taxonomy(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{dataset_id}", response_model=DatasetDetail)
-async def catalog_dataset_detail(dataset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def catalog_dataset_detail(
+    dataset_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User | None = Depends(get_current_user_optional),
+):
     """Dataset detail: meta, available parameters/platforms/processing
-    levels (Master Plan §3 Phase 3 task 2)."""
+    levels (Master Plan §3 Phase 3 task 2). Logged-in views are recorded
+    (Master Plan §3 Phase 6 task 1, backs Overview's "datasets viewed"
+    stat) — anonymous views aren't logged since there's no user to
+    attribute them to."""
     dataset = await get_published_dataset(db, dataset_id)
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if current_user is not None:
+        db.add(DatasetView(user_id=current_user.id, dataset_id=dataset_id))
+        await db.commit()
 
     spatial_bbox = None
     if dataset.spatial_extent is not None:

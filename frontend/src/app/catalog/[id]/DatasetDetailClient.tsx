@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -12,6 +12,8 @@ import type { DatasetDetail } from "@/lib/types/catalog";
 import DatasetRequestModal from "./DatasetRequestModal";
 import { useDatasetFilters } from "./useDatasetFilters";
 import { boundsOf } from "@/lib/geo/spatialAoi";
+import { getPreferences } from "@/lib/api/me";
+import { formatCoordinate, formatDate, type CoordinateFormatPreference, type DateFormatPreference } from "@/lib/format";
 
 const SpatialFilterMap = dynamic(() => import("@/components/map/SpatialFilterMap"), {
   ssr: false,
@@ -53,6 +55,8 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
   const router = useRouter();
   const [showRequest, setShowRequest] = useState(false);
   const [clearSignal, setClearSignal] = useState(0);
+  const [dateFormat, setDateFormat] = useState<DateFormatPreference>("iso");
+  const [coordFormat, setCoordFormat] = useState<CoordinateFormatPreference>("dd");
   const {
     preview,
     matchingCount,
@@ -65,6 +69,21 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
     stationOptions,
     loading,
   } = useDatasetFilters(dataset);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    getPreferences()
+      .then((prefs) => {
+        if (cancelled) return;
+        setDateFormat(prefs.date_format as DateFormatPreference);
+        setCoordFormat(prefs.coordinate_format as CoordinateFormatPreference);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   function clearSpatial() {
     setClearSignal((s) => s + 1);
@@ -106,7 +125,7 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
             License: <b>{dataset.license ?? "—"}</b>
           </div>
           <div className="ph-meta-item">
-            Updated: <b>{new Date(dataset.updated_at).toLocaleDateString()}</b>
+            Updated: <b>{formatDate(dataset.updated_at, dateFormat)}</b>
           </div>
         </div>
       </div>
@@ -138,8 +157,10 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
               <div className="map-filter-info">
                 {filters.bounds ? (
                   <>
-                    <b>Selected:</b> Lat {filters.bounds.latMin.toFixed(2)}–{filters.bounds.latMax.toFixed(2)}, Lon{" "}
-                    {filters.bounds.lonMin.toFixed(2)}–{filters.bounds.lonMax.toFixed(2)}
+                    <b>Selected:</b> Lat {formatCoordinate(filters.bounds.latMin, "lat", coordFormat)}–
+                    {formatCoordinate(filters.bounds.latMax, "lat", coordFormat)}, Lon{" "}
+                    {formatCoordinate(filters.bounds.lonMin, "lon", coordFormat)}–
+                    {formatCoordinate(filters.bounds.lonMax, "lon", coordFormat)}
                   </>
                 ) : (
                   "No area selected — showing all locations"
@@ -327,7 +348,7 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
                     <tbody>
                       {preview.map((r) => (
                         <tr key={r.id}>
-                          <td style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>{r.time}</td>
+                          <td style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>{formatDate(r.time, dateFormat)}</td>
                           <td style={{ fontSize: "0.82rem" }}>{r.location}</td>
                           <td style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{r.depth_m ?? "—"}</td>
                           <td style={{ fontWeight: 500 }}>{r.parameter}</td>

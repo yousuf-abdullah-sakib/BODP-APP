@@ -52,6 +52,12 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     bio: Mapped[str | None] = mapped_column(Text)
     research_area: Mapped[str | None] = mapped_column(String(255))
     datasets_granted: Mapped[int] = mapped_column(default=0, nullable=False)
+    # Set when the user requests account deletion (Master Plan §3 Phase 6
+    # task 3 — soft delete with a 30-day grace period). The account stays
+    # fully functional while this is set; a daily Celery beat task revokes
+    # the user's active grants once 30 days have elapsed. Deletion/
+    # anonymization of the row itself is intentionally out of scope here.
+    deletion_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     user_roles: Mapped[list["UserRole"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -96,3 +102,24 @@ class UserRole(UUIDPKMixin, Base):
     role: Mapped["Role"] = relationship(back_populates="user_roles")
 
     __table_args__ = ()
+
+
+class UserPreferences(Base):
+    """1:1 with User — explicit typed columns (not a JSONB blob), matching
+    SiteSettings' style for this kind of small config set (Master Plan §3
+    Phase 6 task 4). Theme is deliberately NOT here — it stays client-only
+    per Master Plan §0, already implemented via localStorage."""
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    notify_request_status: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_new_dataset: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_weekly_digest: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    notify_security_alerts: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    notify_newsletter: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    date_format: Mapped[str] = mapped_column(String(10), nullable=False, default="iso")
+    coordinate_format: Mapped[str] = mapped_column(String(10), nullable=False, default="dd")
+    compact_table_rows: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

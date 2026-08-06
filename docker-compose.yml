@@ -138,6 +138,8 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
       API_URL_INTERNAL: http://backend:8000/api/v1
+      NEXT_PUBLIC_STORAGE_PUBLIC_URL: ${STORAGE_VPS_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+      NEXT_PUBLIC_STORAGE_BUCKET: bodp-vps
     volumes:
       - ./frontend:/app
       - /app/node_modules

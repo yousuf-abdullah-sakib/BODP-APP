@@ -78,3 +78,11 @@ class StorageService(ABC):
     def ensure_bucket(self, bucket: str) -> None:
         """Create the bucket if it doesn't already exist. Called at startup
         / first use, never assumed to be a manual provisioning step."""
+
+    @abstractmethod
+    def set_public_prefix_policy(self, bucket: str, prefix: str) -> None:
+        """Grants anonymous GET access to objects under `prefix` only —
+        everything else in the bucket (dataset files, extraction outputs)
+        stays private and reachable only via presign_get. Used for avatars,
+        which are rendered as plain <img src> URLs rather than presigned
+        links. Idempotent — safe to call on every upload."""

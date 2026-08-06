@@ -53,3 +53,12 @@ def extract_key(grant_id: uuid.UUID | str, extraction_id: uuid.UUID | str, exten
 
 def previews_key(dataset_id: uuid.UUID | str, filename: str = "thumbnail.png") -> str:
     return f"previews/{dataset_id}/{sanitize_filename(filename)}"
+
+
+def avatar_key(user_id: uuid.UUID | str, filename: str) -> str:
+    """Key for a user's profile avatar image. Stored as a bare object key
+    (like every other *_key column), never a full URL — the frontend
+    resolves it to a fetchable address via the public storage endpoint
+    base at render time, the same way presigned-download URLs are built
+    fresh rather than persisted."""
+    return f"avatars/{user_id}/{sanitize_filename(filename)}"

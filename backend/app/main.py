@@ -11,7 +11,7 @@ from app.core.errors import register_exception_handlers
 from app.core.limiter import limiter
 from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
-from app.routers import admin_datasets, admin_requests, auth, catalog, requests
+from app.routers import admin_datasets, admin_requests, auth, catalog, me, requests
 
 configure_logging()
 
@@ -50,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(catalog.router, prefix=settings.API_V1_PREFIX)
     app.include_router(requests.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_requests.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(me.router, prefix=settings.API_V1_PREFIX)
 
     @app.get("/api/health", tags=["health"])
     async def health():
