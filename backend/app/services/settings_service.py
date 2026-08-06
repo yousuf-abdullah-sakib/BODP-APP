@@ -2,6 +2,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import SiteSettings
+from app.schemas.admin_overview import StorageCapacityUpdate
 from app.schemas.visualize import VizComputeLimitsUpdate, VizExportSettingsUpdate
 
 # SiteSettings is a singleton row (id=1, per the model's own default) with
@@ -22,7 +23,7 @@ async def get_settings(db: AsyncSession) -> SiteSettings:
 
 
 async def update_settings(
-    db: AsyncSession, data: VizExportSettingsUpdate | VizComputeLimitsUpdate
+    db: AsyncSession, data: VizExportSettingsUpdate | VizComputeLimitsUpdate | StorageCapacityUpdate
 ) -> SiteSettings:
     settings = await get_settings(db)
     # exclude_unset (not exclude_none) — the compute-limit date-range

@@ -20,6 +20,7 @@ from app.models.catalog import (
 )
 from app.models.notifications import Notification, SupportTicket
 from app.models.requests import AccessGrant, DatasetRequest, DownloadLog, SubsetExtraction
+from app.models.stats import DailyStatsSnapshot
 from app.models.uploads import QualityIssue, Upload
 from app.models.user import Role, User, UserPreferences, UserRole
 from app.models.visualize import VisualizationJob, VizJobStatus
@@ -57,4 +58,5 @@ __all__ = [
     "SupportTicket",
     "VisualizationJob",
     "VizJobStatus",
+    "DailyStatsSnapshot",
 ]

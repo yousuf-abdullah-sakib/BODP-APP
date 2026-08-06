@@ -1,13 +1,17 @@
 import uuid
 from datetime import datetime
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.models.mixins import UUIDPKMixin
+
+if TYPE_CHECKING:
+    from app.models.catalog import Dataset
 
 
 class UploadStatus(StrEnum):
@@ -73,3 +77,5 @@ class QualityIssue(UUIDPKMixin, Base):
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+    dataset: Mapped["Dataset"] = relationship()

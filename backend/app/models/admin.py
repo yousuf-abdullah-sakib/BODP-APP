@@ -171,6 +171,12 @@ class SiteSettings(Base):
     viz_max_date_range_days_comparison: Mapped[int | None] = mapped_column(Integer)
     viz_max_date_range_days_statistics: Mapped[int | None] = mapped_column(Integer)
 
+    # Master Plan §3 Phase 8 — admin-configurable total storage capacity for
+    # the Overview dashboard's Storage Usage panel. None = not configured;
+    # the panel then shows only the real used-bytes value with no
+    # percentage/progress-bar framing rather than fabricating a total.
+    storage_capacity_bytes: Mapped[int | None] = mapped_column(BigInteger)
+
 
 class BoundaryShapefile(UUIDPKMixin, Base):
     """Backs the shared admin-uploader / public-map-clip-boundary feature."""

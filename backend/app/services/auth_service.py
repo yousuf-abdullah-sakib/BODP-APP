@@ -18,6 +18,7 @@ from app.core.security import (
 )
 from app.models.audit import ActiveSession, FailedLogin
 from app.models.user import User, UserRoleEnum, UserStatus
+from app.services.admin_notify_service import notify_admins
 from app.services.email_service import email_service
 
 
@@ -54,6 +55,15 @@ class AuthService:
             status=UserStatus.ACTIVE.value,
         )
         db.add(user)
+        await db.flush()
+
+        await notify_admins(
+            db,
+            type="info",
+            title="New user registered",
+            description=f"{user.full_name} ({user.email}) created an account.",
+        )
+
         await db.commit()
         await db.refresh(user)
 
@@ -243,6 +253,24 @@ class AuthService:
         # Revoke all existing sessions on password reset — a compromised
         # credential shouldn't leave old sessions valid.
         await self._revoke_all_sessions(db, user.id)
+
+    async def confirm_invite(self, db: AsyncSession, token: str, new_password: str) -> User:
+        try:
+            payload = decode_token(token, expected_type=TokenType.INVITE)
+        except InvalidTokenError as exc:
+            raise AuthError("Invite link is invalid or has expired", status_code=400) from exc
+
+        user_id = uuid.UUID(payload["sub"])
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise AuthError("Account not found", status_code=404)
+
+        user.password_hash = hash_password(new_password)
+        if user.email_verified_at is None:
+            user.email_verified_at = datetime.now(timezone.utc)
+        await db.commit()
+        return user
 
     async def change_password(
         self, db: AsyncSession, user: User, current_password: str, new_password: str

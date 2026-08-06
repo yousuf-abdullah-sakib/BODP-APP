@@ -8,6 +8,7 @@ from app.core.limiter import limiter
 from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordRequest,
+    ConfirmInviteRequest,
     LoginRequest,
     LoginResponse,
     LogoutRequest,
@@ -132,6 +133,18 @@ async def confirm_password_reset(
 ):
     try:
         await auth_service.confirm_password_reset(db, payload.token, payload.new_password)
+    except AuthError as exc:
+        _raise(exc)
+    return None
+
+
+@router.post("/confirm-invite", status_code=status.HTTP_204_NO_CONTENT)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def confirm_invite(
+    request: Request, payload: ConfirmInviteRequest, db: AsyncSession = Depends(get_db)
+):
+    try:
+        await auth_service.confirm_invite(db, payload.token, payload.new_password)
     except AuthError as exc:
         _raise(exc)
     return None

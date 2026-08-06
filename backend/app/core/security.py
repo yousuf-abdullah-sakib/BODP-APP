@@ -19,6 +19,7 @@ class TokenType(StrEnum):
     REFRESH = "refresh"
     EMAIL_VERIFY = "email_verify"
     PASSWORD_RESET = "password_reset"
+    INVITE = "invite"
 
 
 class InvalidTokenError(Exception):
@@ -90,6 +91,15 @@ def create_password_reset_token(user_id: str, email: str) -> str:
         subject=user_id,
         token_type=TokenType.PASSWORD_RESET,
         expires_delta=timedelta(hours=settings.PASSWORD_RESET_TOKEN_EXPIRE_HOURS),
+        extra_claims={"email": email},
+    )
+
+
+def create_invite_token(user_id: str, email: str) -> str:
+    return _create_token(
+        subject=user_id,
+        token_type=TokenType.INVITE,
+        expires_delta=timedelta(hours=settings.INVITE_TOKEN_EXPIRE_HOURS),
         extra_claims={"email": email},
     )
 

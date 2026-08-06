@@ -1,56 +1,213 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.deps import get_client_ip
 from app.core.permissions import require_permission
-from app.models.catalog import Dataset, DatasetStatus
 from app.models.uploads import Upload
 from app.models.user import User
-from app.schemas.admin_datasets import DatasetCreateMinimal, DatasetMinimalPublic
+from app.schemas.admin_datasets import (
+    DatasetAdminDetail,
+    DatasetAdminSummary,
+    DatasetCreate,
+    DatasetPermanentDeleteConfirm,
+    DatasetUpdate,
+)
 from app.schemas.datasets import DatasetFilePublic, DatasetFileUploadResponse, UploadStatusResponse
+from app.services import admin_datasets_service
 from app.services.dataset_file_service import DatasetFileUploadError, upload_dataset_file
 from app.worker.tasks.ingestion import process_dataset_file
 
 router = APIRouter(prefix="/admin/datasets", tags=["admin-datasets"])
 
 
-def _generate_code(sequence_hint: int) -> str:
-    return f"BD-{sequence_hint:04d}"
+def _to_summary(dataset) -> DatasetAdminSummary:
+    return DatasetAdminSummary(
+        id=dataset.id,
+        code=dataset.code,
+        title=dataset.title,
+        category_name=dataset.category.name if dataset.category else None,
+        location=dataset.location,
+        record_count=dataset.record_count,
+        status=dataset.status,
+        updated_at=dataset.updated_at,
+    )
 
 
-@router.post("", response_model=DatasetMinimalPublic, status_code=status.HTTP_201_CREATED)
-async def create_dataset_shell(
-    payload: DatasetCreateMinimal,
+async def _to_detail(db: AsyncSession, dataset) -> DatasetAdminDetail:
+    active_grant_count = await admin_datasets_service.count_active_grants(db, dataset.id)
+    return DatasetAdminDetail(
+        id=dataset.id,
+        code=dataset.code,
+        title=dataset.title,
+        description=dataset.description,
+        category_id=dataset.category_id,
+        category_name=dataset.category.name if dataset.category else None,
+        location=dataset.location,
+        source=dataset.source,
+        platforms=dataset.platforms,
+        parameters=dataset.parameters,
+        resolution=dataset.resolution,
+        license=dataset.license,
+        processing_levels=dataset.processing_levels,
+        formats=dataset.formats,
+        status=dataset.status,
+        temporal_start=dataset.temporal_start,
+        temporal_end=dataset.temporal_end,
+        record_count=dataset.record_count,
+        created_at=dataset.created_at,
+        updated_at=dataset.updated_at,
+        files=[DatasetFilePublic.model_validate(f) for f in dataset.files],
+        active_grant_count=active_grant_count,
+    )
+
+
+@router.get("", response_model=list[DatasetAdminSummary])
+async def list_datasets(
+    search: str | None = None,
+    category_id: uuid.UUID | None = None,
+    status_filter: str | None = None,
     current_user: User = Depends(require_permission("Edit Datasets")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Minimal dataset-shell creation — see Phase 8 for the full admin
-    Dataset create/edit form (category, platforms, processing levels, etc.).
-    This exists so Phase 2's file-upload pipeline has a real FK target."""
-    code = payload.code
-    if not code:
-        count_result = await db.execute(select(Dataset))
-        existing_count = len(count_result.scalars().all())
-        code = _generate_code(existing_count + 1)
-
-    dataset = Dataset(
-        code=code,
-        title=payload.title,
-        description=payload.description,
-        status=DatasetStatus.DRAFT.value,
-        created_by=current_user.id,
+    datasets = await admin_datasets_service.list_datasets_for_admin(
+        db, search=search, category_id=category_id, status_filter=status_filter
     )
-    db.add(dataset)
-    try:
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="A dataset with this code already exists") from exc
-    await db.refresh(dataset)
-    return dataset
+    return [_to_summary(d) for d in datasets]
+
+
+@router.get("/uploads/{upload_id}", response_model=UploadStatusResponse)
+async def get_upload_status(
+    upload_id: uuid.UUID,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Real status polling endpoint (Master Plan §3 Phase 2 deliverable),
+    replacing the prototype's hardcoded 2500ms setTimeout — the frontend's
+    Data Upload section polls this to reflect actual Celery task state.
+
+    Registered before `/{dataset_id}` so the literal "uploads" path
+    segment isn't swallowed by the dataset_id wildcard route."""
+    result = await db.execute(select(Upload).where(Upload.id == upload_id))
+    upload = result.scalar_one_or_none()
+    if upload is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return upload
+
+
+@router.get("/{dataset_id}", response_model=DatasetAdminDetail)
+async def get_dataset(
+    dataset_id: uuid.UUID,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    return await _to_detail(db, dataset)
+
+
+@router.post("", response_model=DatasetAdminDetail, status_code=status.HTTP_201_CREATED)
+async def create_dataset_shell(
+    payload: DatasetCreate,
+    request: Request,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full admin create form. Also accepts the minimal Phase 2 shape
+    (`{title, description}` or `{title, description, code}`) on the same
+    route, since every field beyond title/description is optional."""
+    dataset = await admin_datasets_service.create_dataset(
+        db, payload=payload, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.patch("/{dataset_id}", response_model=DatasetAdminDetail)
+async def update_dataset(
+    dataset_id: uuid.UUID,
+    payload: DatasetUpdate,
+    request: Request,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    dataset = await admin_datasets_service.update_dataset(
+        db, dataset=dataset, payload=payload, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.post("/{dataset_id}/publish", response_model=DatasetAdminDetail)
+async def publish_dataset(
+    dataset_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Publish Content")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    dataset = await admin_datasets_service.set_publish_status(
+        db, dataset=dataset, published=True, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.post("/{dataset_id}/unpublish", response_model=DatasetAdminDetail)
+async def unpublish_dataset(
+    dataset_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Publish Content")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    dataset = await admin_datasets_service.set_publish_status(
+        db, dataset=dataset, published=False, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.post("/{dataset_id}/archive", response_model=DatasetAdminDetail)
+async def archive_dataset(
+    dataset_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Delete Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    dataset = await admin_datasets_service.archive_dataset(
+        db, dataset=dataset, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.post("/{dataset_id}/unarchive", response_model=DatasetAdminDetail)
+async def unarchive_dataset(
+    dataset_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Delete Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    dataset = await admin_datasets_service.unarchive_dataset(
+        db, dataset=dataset, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, dataset)
+
+
+@router.delete("/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def permanently_delete_dataset(
+    dataset_id: uuid.UUID,
+    payload: DatasetPermanentDeleteConfirm,
+    request: Request,
+    current_user: User = Depends(require_permission("Delete Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    dataset = await admin_datasets_service.get_dataset_for_admin(db, dataset_id)
+    await admin_datasets_service.permanently_delete_dataset(
+        db, dataset=dataset, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return None
 
 
 @router.post(
@@ -100,22 +257,6 @@ async def upload_dataset_file_endpoint(
         upload=UploadStatusResponse.model_validate(upload),
         dataset_file=DatasetFilePublic.model_validate(dataset_file),
     )
-
-
-@router.get("/uploads/{upload_id}", response_model=UploadStatusResponse)
-async def get_upload_status(
-    upload_id: uuid.UUID,
-    current_user: User = Depends(require_permission("Edit Datasets")),
-    db: AsyncSession = Depends(get_db),
-):
-    """Real status polling endpoint (Master Plan §3 Phase 2 deliverable),
-    replacing the prototype's hardcoded 2500ms setTimeout — the frontend's
-    Data Upload section polls this to reflect actual Celery task state."""
-    result = await db.execute(select(Upload).where(Upload.id == upload_id))
-    upload = result.scalar_one_or_none()
-    if upload is None:
-        raise HTTPException(status_code=404, detail="Upload not found")
-    return upload
 
 
 @router.get("/{dataset_id}/uploads", response_model=list[UploadStatusResponse])

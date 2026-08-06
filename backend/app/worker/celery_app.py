@@ -14,6 +14,7 @@ celery_app = Celery(
         "app.worker.tasks.notifications",
         "app.worker.tasks.extraction",
         "app.worker.tasks.visualize",
+        "app.worker.tasks.admin_stats",
     ],
 )
 
@@ -40,5 +41,12 @@ celery_app.conf.beat_schedule = {
     "process-pending-deletions-daily": {
         "task": "notifications.process_pending_deletions",
         "schedule": crontab(hour=6, minute=30),
+    },
+    # Master Plan §3 Phase 8 task 7 — daily platform-stats snapshot backing
+    # the admin Overview dashboard's real trend arrows/sparklines. Runs
+    # right after the existing daily pair, same admin-jobs window.
+    "capture-daily-stats-snapshot": {
+        "task": "admin_stats.capture_daily_snapshot",
+        "schedule": crontab(hour=6, minute=45),
     },
 }

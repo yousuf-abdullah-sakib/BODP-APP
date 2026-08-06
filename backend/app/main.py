@@ -13,9 +13,15 @@ from app.core.logging import configure_logging
 from app.core.middleware import RequestContextMiddleware
 from app.routers import (
     admin_boundary,
+    admin_categories,
     admin_datasets,
+    admin_overview,
+    admin_qc,
     admin_requests,
+    admin_roles,
     admin_settings,
+    admin_team,
+    admin_users,
     auth,
     catalog,
     me,
@@ -64,6 +70,12 @@ def create_app() -> FastAPI:
     app.include_router(visualize.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_boundary.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_settings.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_categories.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_users.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_roles.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_qc.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_team.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_overview.router, prefix=settings.API_V1_PREFIX)
 
     @app.get("/api/health", tags=["health"])
     async def health():

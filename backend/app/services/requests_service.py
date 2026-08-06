@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.audit import AuditActionType, AuditLogEntry
+from app.models.audit import AuditActionType
 from app.models.catalog import Dataset, DatasetStatus
 from app.models.requests import (
     AccessGrant,
@@ -19,6 +19,8 @@ from app.models.requests import (
 )
 from app.models.user import User
 from app.schemas.requests import GrantDuration, SearchCriteriaSchema
+from app.services.admin_notify_service import notify_admins
+from app.services.audit_service import write_audit_log
 
 
 def validate_scope_within_grant(requested: SearchCriteriaSchema, grant_scope: dict | None) -> None:
@@ -94,27 +96,6 @@ def compute_expiry(
     raise ValueError(f"Unknown duration: {duration!r}")
 
 
-async def _write_audit_log(
-    db: AsyncSession,
-    *,
-    actor: User,
-    action: str,
-    action_type: AuditActionType,
-    target: str,
-    ip_address: str | None,
-) -> None:
-    db.add(
-        AuditLogEntry(
-            actor_id=actor.id,
-            actor_name=actor.full_name,
-            action=action,
-            action_type=action_type.value,
-            target=target,
-            ip_address=ip_address,
-        )
-    )
-
-
 async def create_request(
     db: AsyncSession,
     *,
@@ -140,6 +121,15 @@ async def create_request(
         status=RequestStatus.PENDING.value,
     )
     db.add(request)
+    await db.flush()
+
+    await notify_admins(
+        db,
+        type="info",
+        title="New dataset access request",
+        description=f"{user.full_name} requested access to \"{dataset.title}\".",
+    )
+
     await db.commit()
     await db.refresh(request)
     return await _get_request_with_relations(db, request.id)
@@ -246,7 +236,7 @@ async def approve_request(
     if requester is not None:
         requester.datasets_granted = (requester.datasets_granted or 0) + 1
 
-    await _write_audit_log(
+    await write_audit_log(
         db,
         actor=admin,
         action="Approved request",
@@ -282,7 +272,7 @@ async def reject_request(
 
     requester = await db.get(User, request.user_id)
 
-    await _write_audit_log(
+    await write_audit_log(
         db,
         actor=admin,
         action="Rejected request",
@@ -325,6 +315,21 @@ async def list_grants_for_user(db: AsyncSession, user_id: uuid.UUID) -> list[Acc
     return list(result.scalars().all())
 
 
+async def list_grants_for_dataset(
+    db: AsyncSession, dataset_id: uuid.UUID, *, status_filter: str | None = None
+) -> list[AccessGrant]:
+    query = (
+        select(AccessGrant)
+        .options(selectinload(AccessGrant.user))
+        .where(AccessGrant.dataset_id == dataset_id)
+        .order_by(AccessGrant.granted_at.desc())
+    )
+    if status_filter:
+        query = query.where(AccessGrant.status == status_filter)
+    result = await db.execute(query)
+    return list(result.scalars().all())
+
+
 async def list_grants_for_admin(
     db: AsyncSession, *, status_filter: str | None = None
 ) -> list[AccessGrant]:
@@ -362,7 +367,7 @@ async def extend_grant(
     grantee = await db.get(User, grant.user_id)
     dataset = await db.get(Dataset, grant.dataset_id)
 
-    await _write_audit_log(
+    await write_audit_log(
         db,
         actor=admin,
         action="Extended access grant",
@@ -410,7 +415,7 @@ async def revoke_grant(
         extraction.status = ExtractionStatus.FAILED.value
         extraction.error_message = "Grant revoked before extraction completed."
 
-    await _write_audit_log(
+    await write_audit_log(
         db,
         actor=admin,
         action="Revoked access grant",

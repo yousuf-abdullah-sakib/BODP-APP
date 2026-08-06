@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 14
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 48
     PASSWORD_RESET_TOKEN_EXPIRE_HOURS: int = 2
+    INVITE_TOKEN_EXPIRE_HOURS: int = 72
 
     # --- Security ---
     FAILED_LOGIN_LOCKOUT_THRESHOLD: int = 5

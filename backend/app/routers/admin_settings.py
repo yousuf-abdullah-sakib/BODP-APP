@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.permissions import require_admin
 from app.models.user import User
+from app.schemas.admin_overview import StorageCapacitySchema, StorageCapacityUpdate
 from app.schemas.visualize import (
     VizComputeLimitsSchema,
     VizComputeLimitsUpdate,
@@ -43,6 +44,23 @@ async def get_visualization_compute_limits(db: AsyncSession = Depends(get_db)):
 @router.patch("/visualization-limits", response_model=VizComputeLimitsSchema)
 async def update_visualization_compute_limits(
     body: VizComputeLimitsUpdate,
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.update_settings(db, body)
+
+
+@router.get("/storage-capacity", response_model=StorageCapacitySchema)
+async def get_storage_capacity(
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await settings_service.get_settings(db)
+
+
+@router.patch("/storage-capacity", response_model=StorageCapacitySchema)
+async def update_storage_capacity(
+    body: StorageCapacityUpdate,
     current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ):

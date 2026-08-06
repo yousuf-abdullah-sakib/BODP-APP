@@ -108,6 +108,20 @@ class EmailService:
         """
         self.send(to, f"Access expiring soon — {dataset_title}", html)
 
+    def send_admin_invite_email(
+        self, to: str, full_name: str, token: str, *, is_admin: bool
+    ) -> None:
+        set_password_url = f"{settings.FRONTEND_URL}/set-password?token={token}"
+        role_desc = "an administrator" if is_admin else "a researcher"
+        html = f"""
+        <p>Hello {full_name},</p>
+        <p>An administrator has created {role_desc} account for you on
+        {settings.EMAIL_FROM_NAME}.</p>
+        <p><a href="{set_password_url}">Set your password to activate your account</a></p>
+        <p>This link expires in {settings.INVITE_TOKEN_EXPIRE_HOURS} hours.</p>
+        """
+        self.send(to, f"You've been invited to {settings.EMAIL_FROM_NAME}", html)
+
     def send_support_ticket_created_email(
         self, to: str, *, subject: str, requester_name: str, requester_email: str, message: str
     ) -> None:
