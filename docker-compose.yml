@@ -26,6 +26,8 @@ x-backend-env: &backend-env
   SMTP_PORT: ${SMTP_PORT:-587}
   SMTP_USERNAME: ${SMTP_USERNAME:-}
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-no-reply@bodp.example.org}
+  EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-BODP Platform}
 
 services:
   postgres:
