@@ -26,7 +26,33 @@ class EmailService:
         message.add_alternative(html_body, subtype="html")
 
         if settings.ENVIRONMENT == "development" and not settings.SMTP_USERNAME:
-            logger.info("email.dev_mode_skipped_send", to=to, subject=subject)
+            # No SMTP provider configured — print the full email to the
+            # console instead of silently dropping it, so a developer can
+            # copy a real verification/reset/invite link out of the backend
+            # log and complete the flow exactly as a real recipient would.
+            # Switches back to the real smtplib path below automatically
+            # the moment SMTP_USERNAME is set; no caller changes needed.
+            divider = "=" * 70
+            links = _extract_links(html_body)
+            detail_lines = []
+            for href in links:
+                detail_lines.append(f"Link:    {href}")
+                token = _extract_token(href)
+                if token:
+                    detail_lines.append(f"Token:   {token}")
+            details_block = "\n".join(detail_lines) + "\n" if detail_lines else ""
+            print(
+                f"\n{divider}\n"
+                f"[DEV EMAIL] SMTP not configured — printing instead of sending\n"
+                f"{divider}\n"
+                f"To:      {to}\n"
+                f"Subject: {subject}\n"
+                f"{details_block}"
+                f"{divider}\n"
+                f"{text_body or _strip_html(html_body)}\n"
+                f"{divider}\n"
+            )
+            logger.info("email.dev_mode_printed", to=to, subject=subject, links=links)
             return
 
         try:
@@ -137,6 +163,20 @@ def _strip_html(html: str) -> str:
     import re
 
     return re.sub(r"<[^>]+>", "", html).strip()
+
+
+def _extract_links(html: str) -> list[str]:
+    import re
+
+    return re.findall(r'href="([^"]+)"', html)
+
+
+def _extract_token(url: str) -> str | None:
+    from urllib.parse import parse_qs, urlparse
+
+    query = parse_qs(urlparse(url).query)
+    values = query.get("token")
+    return values[0] if values else None
 
 
 email_service = EmailService()
