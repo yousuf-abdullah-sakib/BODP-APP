@@ -93,8 +93,17 @@ class TestPhase9PermissionMigrationLogic:
 
 
 class TestPermissionListConsistency:
-    async def test_permission_list_has_thirteen_entries_including_new_five(self):
-        assert len(PERMISSION_LIST) == 13
+    async def test_permission_list_has_fourteen_entries_including_new_five(self):
+        # 13 -> 14: a later migration (29bbbb8a3f6b_seed_manage_support_permission)
+        # added "Manage Support" for the contact-form/support-ticket admin
+        # surfaces, following the same idempotent seed-if-exact-prior-set
+        # pattern as this file's own Phase 9 migration tests above. This
+        # count assertion is updated to match; the migration itself isn't
+        # covered by a dedicated TestPhase9PermissionMigrationLogic-style
+        # class here since that's out of scope for this file (named/scoped
+        # to the Phase 9 a3c47b895dae migration specifically).
+        assert len(PERMISSION_LIST) == 14
+        assert "Manage Support" in PERMISSION_LIST
         for perm in _NEW_PERMISSIONS:
             assert perm in PERMISSION_LIST
         for perm in _ORIGINAL_PERMISSION_LIST:

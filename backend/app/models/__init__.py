@@ -18,7 +18,7 @@ from app.models.catalog import (
     DatasetView,
     Station,
 )
-from app.models.notifications import Notification, SupportTicket
+from app.models.notifications import ContactSubmission, Notification, SupportTicket
 from app.models.requests import AccessGrant, DatasetRequest, DownloadLog, SubsetExtraction
 from app.models.stats import DailyStatsSnapshot
 from app.models.uploads import QualityIssue, Upload
@@ -56,6 +56,7 @@ __all__ = [
     "BoundaryShapefile",
     "Notification",
     "SupportTicket",
+    "ContactSubmission",
     "VisualizationJob",
     "VizJobStatus",
     "DailyStatsSnapshot",

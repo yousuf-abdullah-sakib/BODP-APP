@@ -28,10 +28,10 @@ export default function DownloadButton({
   const [format, setFormat] = useState<ExtractionFormat>("csv");
 
   return (
-    <div style={{ display: "flex", gap: "0.4rem", flex: fullWidth ? 1 : undefined }}>
+    <div style={{ display: "flex", gap: "0.4rem", flex: fullWidth ? 1 : undefined, minWidth: 0 }}>
       <select
         className="filter-select"
-        style={{ flex: fullWidth ? "0 0 auto" : undefined, maxWidth: 120 }}
+        style={{ flex: fullWidth ? "0 1 100px" : undefined, maxWidth: 100, minWidth: 0 }}
         value={format}
         onChange={(e) => setFormat(e.target.value as ExtractionFormat)}
         disabled={busy}
@@ -44,7 +44,7 @@ export default function DownloadButton({
       </select>
       <button
         className={buttonClassName}
-        style={{ flex: 1 }}
+        style={{ flex: 1, minWidth: 0 }}
         disabled={busy}
         onClick={() => onDownload(grant, format)}
       >

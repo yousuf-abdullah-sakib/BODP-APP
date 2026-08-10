@@ -1,16 +1,19 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.limiter import limiter
+from app.schemas.admin_contact import ContactSubmissionCreate
 from app.schemas.content import (
     PublicBlogPostDetail,
     PublicBlogPostSummary,
     PublicCmsBlock,
     PublicTeamMember,
 )
-from app.services import content_service
+from app.services import content_service, contact_service
 from app.services.admin_media_service import media_url
 
 router = APIRouter(prefix="/content", tags=["content"])
@@ -84,3 +87,15 @@ async def get_blog_post(post_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         created_at=post.created_at,
         content_html=post.content_html,
     )
+
+
+@router.post("/contact", status_code=status.HTTP_201_CREATED)
+@limiter.limit(settings.RATE_LIMIT_AUTH)
+async def submit_contact_form(
+    request: Request, payload: ContactSubmissionCreate, db: AsyncSession = Depends(get_db)
+):
+    """Public, unauthenticated write — the /contact page form. Notifies
+    admins holding "Manage Support" in-app; a reply is sent by email from
+    the admin Contact Information section, not from here."""
+    await contact_service.create_submission(db, payload)
+    return {"message": "Your message has been sent. We'll respond to your email within 2 business days."}

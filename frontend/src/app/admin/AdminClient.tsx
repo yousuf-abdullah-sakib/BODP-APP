@@ -11,6 +11,7 @@ import AdminRequestsSection from "./sections/AdminRequestsSection";
 import AnalyticsSection from "./sections/AnalyticsSection";
 import AuditLogSection from "./sections/AuditLogSection";
 import BlogPostsSection from "./sections/BlogPostsSection";
+import ContactMessagesSection from "./sections/ContactMessagesSection";
 import DataQualityCheckSection from "./sections/DataQualityCheckSection";
 import DatasetCategoriesSection from "./sections/DatasetCategoriesSection";
 import DataVisualizationSection from "./sections/DataVisualizationSection";
@@ -21,6 +22,7 @@ import ReportsSection from "./sections/ReportsSection";
 import RolesPermissionsSection from "./sections/RolesPermissionsSection";
 import SettingsSection from "./sections/SettingsSection";
 import SiteContentSection from "./sections/SiteContentSection";
+import SupportTicketsSection from "./sections/SupportTicketsSection";
 import UsersSection from "./sections/UsersSection";
 import VisualizationExportsSection from "./sections/VisualizationExportsSection";
 import VisualizationLimitsSection from "./sections/VisualizationLimitsSection";
@@ -95,6 +97,13 @@ export default function AdminClient() {
         { key: "settings", label: "Settings", icon: "⚙️" },
       ],
     },
+    {
+      title: "Support",
+      items: [
+        { key: "contact", label: "Contact Information", icon: "✉️" },
+        { key: "support-tickets", label: "Support Tickets", icon: "🎫" },
+      ],
+    },
   ];
 
   return (
@@ -131,6 +140,8 @@ export default function AdminClient() {
       {active === "reports" && <ReportsSection />}
       {active === "audit" && <AuditLogSection />}
       {active === "settings" && <SettingsSection />}
+      {active === "contact" && <ContactMessagesSection />}
+      {active === "support-tickets" && <SupportTicketsSection />}
     </DashboardShell>
   );
 }

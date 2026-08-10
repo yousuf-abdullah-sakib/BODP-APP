@@ -91,7 +91,15 @@ export default function MyDatasetsSection() {
               <div className="dl-card-meta">
                 <span>⏳ Expires {new Date(g.expires_at).toLocaleDateString()}</span>
               </div>
-              <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.6rem", alignItems: "center" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "0.5rem",
+                  marginTop: "0.6rem",
+                  alignItems: "center",
+                  minWidth: 0,
+                }}
+              >
                 <button className="btn-icon-sm" title="Dataset details" onClick={() => setViewing(g)}>
                   ℹ
                 </button>

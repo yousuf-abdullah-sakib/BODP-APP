@@ -94,6 +94,8 @@ export interface SupportTicketSummary {
   priority: string;
   status: string;
   message: string;
+  reply_message: string | null;
+  replied_at: string | null;
   created_at: string;
 }
 

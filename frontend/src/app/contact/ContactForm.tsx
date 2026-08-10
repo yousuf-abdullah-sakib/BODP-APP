@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { submitContactForm } from "@/lib/api/content";
+import { ApiError } from "@/lib/api/client";
 
 const SUBJECTS = [
   { value: "data_request", label: "Dataset Request Help" },
@@ -52,19 +54,31 @@ export default function ContactForm() {
     }
 
     setSending(true);
-    await new Promise((r) => setTimeout(r, 1200));
-    setSending(false);
-
-    setSuccess(
-      `✅ Thank you, ${firstName}! Your message has been sent. We'll respond to ${email} within 2 business days.`
-    );
-    setFirstName("");
-    setLastName("");
-    setEmail("");
-    setOrg("");
-    setSubject("");
-    setMessage("");
-    setConsent(false);
+    try {
+      await submitContactForm({
+        name: `${firstName.trim()} ${lastName.trim()}`,
+        email: email.trim(),
+        organization: org.trim() || null,
+        subject,
+        message: message.trim(),
+      });
+      setSuccess(
+        `✅ Thank you, ${firstName}! Your message has been sent. We'll respond to ${email} within 2 business days.`
+      );
+      setFirstName("");
+      setLastName("");
+      setEmail("");
+      setOrg("");
+      setSubject("");
+      setMessage("");
+      setConsent(false);
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Unable to send your message. Please try again."
+      );
+    } finally {
+      setSending(false);
+    }
   }
 
   return (
@@ -173,7 +187,8 @@ export default function ContactForm() {
         />
         <label htmlFor="cfConsent">
           I agree to BODP processing my contact details to respond to this enquiry.
-          My data will be handled in accordance with the <a href="#">Privacy Policy</a>.
+          My data will be handled in accordance with the{" "}
+          <a href="/legal/privacy-policy">Privacy Policy</a>.
         </label>
       </div>
 

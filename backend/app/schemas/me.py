@@ -132,6 +132,8 @@ class SupportTicketSummary(BaseModel):
     priority: str
     status: str
     message: str
+    reply_message: str | None
+    replied_at: datetime | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

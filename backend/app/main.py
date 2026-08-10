@@ -19,6 +19,7 @@ from app.routers import (
     admin_boundary,
     admin_categories,
     admin_cms,
+    admin_contact,
     admin_datasets,
     admin_media,
     admin_overview,
@@ -27,6 +28,7 @@ from app.routers import (
     admin_requests,
     admin_roles,
     admin_settings,
+    admin_support,
     admin_team,
     admin_users,
     auth,
@@ -91,6 +93,8 @@ def create_app() -> FastAPI:
     app.include_router(admin_reports.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_audit.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_about_team.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_contact.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_support.router, prefix=settings.API_V1_PREFIX)
     app.include_router(content.router, prefix=settings.API_V1_PREFIX)
 
     @app.get("/api/health", tags=["health"])

@@ -1,5 +1,6 @@
 import { apiFetch } from "./client";
 import type {
+  ContactSubmissionCreate,
   PublicBlogPostDetail,
   PublicBlogPostSummary,
   PublicCmsBlock,
@@ -30,6 +31,16 @@ export async function getBlogPosts(params?: {
 
 export async function getBlogPost(id: string): Promise<PublicBlogPostDetail> {
   return apiFetch<PublicBlogPostDetail>(`/content/blog/${id}`, { skipAuth: true });
+}
+
+export async function submitContactForm(
+  data: ContactSubmissionCreate
+): Promise<{ message: string }> {
+  return apiFetch<{ message: string }>("/content/contact", {
+    method: "POST",
+    body: data,
+    skipAuth: true,
+  });
 }
 
 /** Reduces a block list to a `key -> value` lookup, defaulting null values to "". */

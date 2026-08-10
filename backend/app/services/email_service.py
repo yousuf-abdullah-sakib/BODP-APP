@@ -164,6 +164,38 @@ class EmailService:
         """
         self.send(to, f"New support ticket — {subject}", html)
 
+    def send_contact_reply_email(
+        self,
+        to: str,
+        *,
+        name: str,
+        original_subject: str,
+        original_message: str,
+        reply_message: str,
+    ) -> None:
+        # `name`/`original_subject`/`original_message` are public, unauthenticated
+        # visitor input (the /contact form has no auth) — escape before
+        # interpolating into HTML, unlike this file's other send_* methods,
+        # which only ever embed already-trusted server-side/authenticated values.
+        import html as html_lib
+
+        safe_name = html_lib.escape(name)
+        safe_subject = html_lib.escape(original_subject)
+        safe_original = html_lib.escape(original_message).replace("\n", "<br>")
+        safe_reply = html_lib.escape(reply_message).replace("\n", "<br>")
+        html = f"""
+        <p>Hello {safe_name},</p>
+        <p>Thanks for contacting {settings.EMAIL_FROM_NAME}. Here's our reply to your message:</p>
+        <blockquote style="border-left:3px solid #ccc;margin:0 0 1em;padding-left:1em;color:#333;">
+        {safe_reply}
+        </blockquote>
+        <p style="color:#888;font-size:0.85em;">Your original message ({safe_subject}):</p>
+        <blockquote style="border-left:3px solid #eee;margin:0;padding-left:1em;color:#888;font-size:0.85em;">
+        {safe_original}
+        </blockquote>
+        """
+        self.send(to, f"Re: {original_subject}", html)
+
 
 def _strip_html(html: str) -> str:
     import re

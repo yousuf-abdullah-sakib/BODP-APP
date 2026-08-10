@@ -13,6 +13,7 @@ export default function ContactSupportSection() {
   const [tickets, setTickets] = useState<SupportTicketSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const [subject, setSubject] = useState("");
   const [category, setCategory] = useState(CATEGORIES[0]);
@@ -137,39 +138,93 @@ export default function ContactSupportSection() {
                 </thead>
                 <tbody>
                   {tickets.map((t) => (
-                    <tr key={t.id}>
-                      <td style={{ fontWeight: 500, maxWidth: 260 }}>{t.subject}</td>
-                      <td style={{ fontSize: "0.8rem" }}>{t.category ?? "—"}</td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            t.priority === "high"
-                              ? "badge-alert"
-                              : t.priority === "medium"
-                                ? "badge-caution"
-                                : "badge-normal"
-                          }`}
-                        >
-                          {t.priority}
-                        </span>
-                      </td>
-                      <td>
-                        <span
-                          className={`badge ${
-                            t.status === "closed"
-                              ? "badge-revoked"
-                              : t.status === "answered"
-                                ? "badge-approved"
-                                : "badge-pending"
-                          }`}
-                        >
-                          {t.status}
-                        </span>
-                      </td>
-                      <td style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
-                        {new Date(t.created_at).toLocaleDateString()}
-                      </td>
-                    </tr>
+                    <>
+                      <tr
+                        key={t.id}
+                        onClick={() => setExpandedId(expandedId === t.id ? null : t.id)}
+                        style={{ cursor: "pointer" }}
+                      >
+                        <td style={{ fontWeight: 500, maxWidth: 260 }}>
+                          {t.subject}
+                          {t.reply_message && (
+                            <span
+                              style={{
+                                marginLeft: "0.5rem",
+                                fontSize: "0.72rem",
+                                color: "var(--green)",
+                              }}
+                            >
+                              ● Replied
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ fontSize: "0.8rem" }}>{t.category ?? "—"}</td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              t.priority === "high"
+                                ? "badge-alert"
+                                : t.priority === "medium"
+                                  ? "badge-caution"
+                                  : "badge-normal"
+                            }`}
+                          >
+                            {t.priority}
+                          </span>
+                        </td>
+                        <td>
+                          <span
+                            className={`badge ${
+                              t.status === "closed"
+                                ? "badge-revoked"
+                                : t.status === "answered"
+                                  ? "badge-approved"
+                                  : "badge-pending"
+                            }`}
+                          >
+                            {t.status}
+                          </span>
+                        </td>
+                        <td style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
+                          {new Date(t.created_at).toLocaleDateString()}
+                        </td>
+                      </tr>
+                      {expandedId === t.id && (
+                        <tr key={`${t.id}-detail`}>
+                          <td colSpan={5} style={{ background: "var(--bg-primary)", padding: "1rem 1.2rem" }}>
+                            <div style={{ fontSize: "0.8rem", marginBottom: "0.8rem" }}>
+                              <div style={{ color: "var(--text-muted)", marginBottom: "0.3rem" }}>
+                                Your message:
+                              </div>
+                              <div style={{ whiteSpace: "pre-wrap" }}>{t.message}</div>
+                            </div>
+                            {t.reply_message ? (
+                              <div style={{ fontSize: "0.8rem" }}>
+                                <div style={{ color: "var(--green)", marginBottom: "0.3rem" }}>
+                                  Admin reply
+                                  {t.replied_at ? ` — ${new Date(t.replied_at).toLocaleString()}` : ""}:
+                                </div>
+                                <div
+                                  style={{
+                                    background: "rgba(22,163,74,0.06)",
+                                    border: "1px solid rgba(22,163,74,0.2)",
+                                    borderRadius: "8px",
+                                    padding: "0.7rem",
+                                    whiteSpace: "pre-wrap",
+                                  }}
+                                >
+                                  {t.reply_message}
+                                </div>
+                              </div>
+                            ) : (
+                              <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                                Awaiting a reply from the BODP team.
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </>
                   ))}
                 </tbody>
               </table>

@@ -40,6 +40,8 @@ PERMISSION_LIST = [
     "Manage Media",
     "View Reports",
     "View Audit Log",
+    # Contact form submissions + support tickets admin surfaces.
+    "Manage Support",
 ]
 
 
