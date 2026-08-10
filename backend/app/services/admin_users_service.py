@@ -135,6 +135,16 @@ async def assign_role(
         return
 
     db.add(UserRole(user_id=user.id, role_id=role.id))
+
+    # The "Administrator" fine-grained Role is the single source of truth for
+    # coarse admin access — require_permission() checks BOTH `user.role ==
+    # 'admin'` AND the fine-grained permission, so a user assigned this Role
+    # without also being flipped to the coarse admin role would still get
+    # 403'd everywhere. The other seeded/custom Roles stay purely additive
+    # permission grants and never touch the coarse role.
+    if role.name == "Administrator":
+        user.role = UserRoleEnum.ADMIN.value
+
     await write_audit_log(
         db,
         actor=actor,
@@ -157,6 +167,21 @@ async def unassign_role(
         return
 
     await db.delete(user_role)
+
+    # Mirror of the sync in assign_role above — losing the Administrator
+    # Role drops the user back to a plain researcher account. Uses a flush
+    # so the DELETE above is visible to this membership re-check rather
+    # than counting the row we're in the middle of removing.
+    if role.name == "Administrator":
+        await db.flush()
+        remaining = await db.execute(
+            select(UserRole)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user.id, Role.name == "Administrator")
+        )
+        if remaining.scalar_one_or_none() is None:
+            user.role = UserRoleEnum.USER.value
+
     await write_audit_log(
         db,
         actor=actor,

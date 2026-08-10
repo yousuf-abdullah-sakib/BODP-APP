@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app.core.database import AsyncSessionLocal
 from app.models.audit import AuditLogEntry
 from app.models.catalog import Dataset, DatasetCategory, DatasetStatus
+from app.models.notifications import Notification
 from app.models.requests import AccessGrant, DatasetRequest, GrantStatus, RequestStatus
 from app.models.user import User
 from tests.conftest import register_verified_user
@@ -112,6 +113,54 @@ class TestSubmitRequest:
         r = await _submit_request(client, headers, dataset_id, search_criteria=criteria)
         assert r.status_code == 201, r.text
         assert r.json()["search_criteria"]["category"] == "Environmental"
+
+    async def test_submit_notifies_approving_admin_exactly_once(self, client, monkeypatch):
+        # Regression test: request submission used to notify admins via TWO
+        # independent paths — a synchronous notify_admins() call selecting
+        # by coarse role=='admin', and the send_request_submitted Celery
+        # task selecting by fine-grained "Approve Requests" permission.
+        # Any admin matching both selections (which every admin fixture in
+        # this file does — see register_verified_user's admin=True +
+        # permissions=[...] combination) got two Notification rows for one
+        # event.
+        from app.services.email_service import EmailService
+
+        monkeypatch.setattr(EmailService, "send_request_submitted_email", lambda self, *a, **k: None)
+
+        dataset_id = await _seed_published_dataset(code="BD-NOTIF-DEDUP")
+        # Return value unused — this call's only purpose here is to create
+        # the admin user (role='admin' + "Approve Requests" permission).
+        await _admin_headers_with_approve_permission(client)
+        researcher_headers = await _researcher_headers(client, email="notif-dedup-researcher@example.com")
+
+        async with AsyncSessionLocal() as db:
+            admin_user = (
+                await db.execute(
+                    select(User).where(User.email == "requests-admin@example.com")
+                )
+            ).scalar_one()
+            admin_id = admin_user.id
+            # Precondition: this fixture must satisfy BOTH old selection
+            # criteria for the test to actually exercise the bug scenario
+            # (rather than passing vacuously because one path never
+            # matched anyone).
+            assert admin_user.role == "admin"
+
+        r = await _submit_request(client, researcher_headers, dataset_id)
+        assert r.status_code == 201, r.text
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Notification).where(
+                    Notification.user_id == admin_id,
+                    Notification.title == "New dataset access request",
+                )
+            )
+            matching = result.scalars().all()
+        assert len(matching) == 1, (
+            f"expected exactly 1 notification, got {len(matching)} — "
+            "notify_admins and send_request_submitted are double-firing"
+        )
 
 
 class TestAdminRequestsList:

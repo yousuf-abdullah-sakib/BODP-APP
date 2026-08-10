@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_invite_token, hash_password
 from app.models.admin import AdminTeamMember
 from app.models.audit import AuditActionType
-from app.models.user import User, UserRoleEnum, UserStatus
+from app.models.user import Role, User, UserRole, UserRoleEnum, UserStatus
 from app.schemas.admin_team import AdminTeamMemberCreate, AdminTeamMemberUpdate
 from app.services.audit_service import write_audit_log
 from app.services.email_service import email_service
@@ -45,6 +45,18 @@ async def invite_admin(
     )
     db.add(user)
     await db.flush()
+
+    # The coarse role='admin' above only satisfies HALF of what
+    # require_permission() checks — every fine-grained-permission-gated
+    # section (the vast majority of the admin panel) also needs the user to
+    # hold a Role granting that permission. Without this, an invited admin
+    # could sign in but get 403s (surfacing as stuck/failed loads) on nearly
+    # every section. Attaching the seeded "Administrator" Role (all
+    # permissions) here is what makes "Admin Management" actually invite a
+    # fully-privileged administrator, matching what the name implies.
+    admin_role = (await db.execute(select(Role).where(Role.name == "Administrator"))).scalar_one_or_none()
+    if admin_role is not None:
+        db.add(UserRole(user_id=user.id, role_id=admin_role.id))
 
     member = AdminTeamMember(
         user_id=user.id,

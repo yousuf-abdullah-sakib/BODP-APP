@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
-from app.models.user import User
+from app.models.user import PERMISSION_LIST, Role, User
 from app.services import email_service as email_service_module
 from tests.conftest import register_verified_user
 
@@ -17,6 +17,16 @@ async def _admin_headers(client, *, permissions: list[str]) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def _seed_administrator_role() -> None:
+    # _reset_database truncates `roles` before every test, so the real
+    # migration-seeded "Administrator" row never exists in this suite —
+    # invite_admin looks it up by exact name, so tests that exercise the
+    # full-access-on-invite behavior need to seed it themselves first.
+    async with AsyncSessionLocal() as db:
+        db.add(Role(name="Administrator", description="test", permissions=list(PERMISSION_LIST)))
+        await db.commit()
+
+
 def _capture_invite_token(monkeypatch) -> list[str]:
     captured = []
 
@@ -29,6 +39,7 @@ def _capture_invite_token(monkeypatch) -> list[str]:
 
 class TestAdminTeamInvite:
     async def test_invite_creates_admin_user_and_roster_entry(self, client, monkeypatch):
+        await _seed_administrator_role()
         captured = _capture_invite_token(monkeypatch)
         headers = await _admin_headers(client, permissions=["Manage Users"])
 
@@ -64,6 +75,17 @@ class TestAdminTeamInvite:
             "/api/v1/admin/overview", headers={"Authorization": f"Bearer {new_admin_token}"}
         )
         assert r.status_code == 200
+
+        # Confirm the invited admin also got real fine-grained permissions
+        # (require_permission gate) — this is the actual bug: an invited
+        # admin previously had role='admin' but no attached Role, so every
+        # permission-gated section (the vast majority of the admin panel)
+        # 403'd for them despite being able to log in and reach Overview.
+        r = await client.get(
+            "/api/v1/admin/audit-log",
+            headers={"Authorization": f"Bearer {new_admin_token}"},
+        )
+        assert r.status_code == 200, r.text
 
     async def test_invite_requires_permission(self, client, monkeypatch):
         _capture_invite_token(monkeypatch)

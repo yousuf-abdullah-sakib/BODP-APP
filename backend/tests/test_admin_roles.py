@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
-from app.models.user import User
+from app.models.user import PERMISSION_LIST, User
 from tests.conftest import register_verified_user
 
 pytestmark = pytest.mark.asyncio
@@ -113,3 +113,143 @@ class TestRoleDeletionEffects:
         role_id = r.json()["id"]
         r = await client.delete(f"/api/v1/admin/roles/{role_id}", headers=headers)
         assert r.status_code == 409
+
+    async def test_cannot_rename_system_roles(self, client):
+        headers = await _admin_headers(client, permissions=["Manage Roles"])
+        r = await client.post(
+            "/api/v1/admin/roles", json={"name": "Administrator", "permissions": []}, headers=headers
+        )
+        role_id = r.json()["id"]
+        r = await client.patch(
+            f"/api/v1/admin/roles/{role_id}", json={"name": "Not Administrator Anymore"}, headers=headers
+        )
+        assert r.status_code == 409
+
+        # Renaming to its own current name is a no-op, not a conflict.
+        r = await client.patch(
+            f"/api/v1/admin/roles/{role_id}",
+            json={"name": "Administrator", "description": "still full access"},
+            headers=headers,
+        )
+        assert r.status_code == 200
+
+
+class TestAdministratorRoleSyncsCoarseAccess:
+    """The 'Administrator' fine-grained Role is the single source of truth
+    for coarse admin access — require_permission() checks BOTH `role ==
+    'admin'` AND the fine-grained permission, so the two must never drift
+    apart. See admin_users_service.assign_role/unassign_role."""
+
+    async def test_assigning_administrator_role_grants_coarse_admin_access(self, client):
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles", "Manage Users"])
+
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "Administrator", "permissions": list(PERMISSION_LIST)},
+            headers=admin_headers,
+        )
+        assert r.status_code == 201, r.text
+        role_id = r.json()["id"]
+
+        # A plain researcher account — role='user', not 'admin' — assigned
+        # the Administrator role via Roles & Permissions (not Admin
+        # Management/invite).
+        target_token = await register_verified_user(client, email="promoted-researcher@example.com")
+        async with AsyncSessionLocal() as db:
+            user = (
+                await db.execute(
+                    select(User).where(User.email == "promoted-researcher@example.com")
+                )
+            ).scalar_one()
+            assert user.role == "user"
+            user_id = str(user.id)
+
+        r = await client.post(
+            f"/api/v1/admin/users/{user_id}/roles/{role_id}", headers=admin_headers
+        )
+        assert r.status_code == 204
+
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            assert user.role == "admin"
+
+        # Real proof, not just the DB column: a coarse-admin-gated endpoint
+        # (require_admin, no fine-grained permission needed) now works too.
+        target_headers = {"Authorization": f"Bearer {target_token}"}
+        r = await client.get("/api/v1/admin/overview", headers=target_headers)
+        assert r.status_code == 200, r.text
+
+    async def test_unassigning_administrator_role_revokes_coarse_admin_access(self, client):
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles", "Manage Users"])
+
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "Administrator", "permissions": list(PERMISSION_LIST)},
+            headers=admin_headers,
+        )
+        role_id = r.json()["id"]
+
+        target_token = await register_verified_user(client, email="demoted-admin@example.com")
+        async with AsyncSessionLocal() as db:
+            user = (
+                await db.execute(select(User).where(User.email == "demoted-admin@example.com"))
+            ).scalar_one()
+            user_id = str(user.id)
+
+        r = await client.post(
+            f"/api/v1/admin/users/{user_id}/roles/{role_id}", headers=admin_headers
+        )
+        assert r.status_code == 204
+
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            assert user.role == "admin"
+
+        r = await client.delete(
+            f"/api/v1/admin/users/{user_id}/roles/{role_id}", headers=admin_headers
+        )
+        assert r.status_code == 204
+
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            assert user.role == "user"
+
+        target_headers = {"Authorization": f"Bearer {target_token}"}
+        r = await client.get("/api/v1/admin/overview", headers=target_headers)
+        assert r.status_code == 403
+
+    async def test_other_roles_never_grant_coarse_admin_access(self, client):
+        # A non-Administrator Role — even one granting many permissions —
+        # must never flip the coarse role column. Only the Role literally
+        # named "Administrator" does.
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles", "Manage Users"])
+
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "Content Editor", "permissions": ["Manage CMS", "Manage Blog"]},
+            headers=admin_headers,
+        )
+        role_id = r.json()["id"]
+
+        target_token = await register_verified_user(client, email="content-editor@example.com")
+        async with AsyncSessionLocal() as db:
+            user = (
+                await db.execute(select(User).where(User.email == "content-editor@example.com"))
+            ).scalar_one()
+            user_id = str(user.id)
+
+        r = await client.post(
+            f"/api/v1/admin/users/{user_id}/roles/{role_id}", headers=admin_headers
+        )
+        assert r.status_code == 204
+
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            assert user.role == "user"
+
+        # No coarse admin access — require_permission's first check (role
+        # == 'admin') rejects before even looking at the fine-grained
+        # permission the role actually grants.
+        target_headers = {"Authorization": f"Bearer {target_token}"}
+        r = await client.get("/api/v1/admin/cms/blocks?page=home", headers=target_headers)
+        assert r.status_code == 403

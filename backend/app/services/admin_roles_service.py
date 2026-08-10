@@ -67,7 +67,20 @@ async def create_role(
 async def update_role(
     db: AsyncSession, *, role: Role, payload: RoleUpdate, actor: User, ip_address: str | None
 ) -> Role:
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+
+    # "Administrator" is matched by exact name elsewhere (assign_role's
+    # coarse-role sync, this module's own delete protection) — renaming it
+    # would silently break that without any error here, so block it the
+    # same way delete_role already blocks deleting it.
+    if (
+        role.name in _SYSTEM_ROLE_NAMES
+        and "name" in updates
+        and updates["name"] != role.name
+    ):
+        raise HTTPException(status_code=409, detail="Cannot rename a system-seeded role")
+
+    for field, value in updates.items():
         setattr(role, field, value)
 
     await write_audit_log(

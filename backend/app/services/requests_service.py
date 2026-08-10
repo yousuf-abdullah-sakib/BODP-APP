@@ -19,7 +19,6 @@ from app.models.requests import (
 )
 from app.models.user import User
 from app.schemas.requests import GrantDuration, SearchCriteriaSchema
-from app.services.admin_notify_service import notify_admins
 from app.services.audit_service import write_audit_log
 
 
@@ -123,12 +122,12 @@ async def create_request(
     db.add(request)
     await db.flush()
 
-    await notify_admins(
-        db,
-        type="info",
-        title="New dataset access request",
-        description=f"{user.full_name} requested access to \"{dataset.title}\".",
-    )
+    # Notification for this event is dispatched by the caller via
+    # send_request_submitted.delay() (see routers/requests.py), which
+    # targets admins holding "Approve Requests" specifically — the ones who
+    # can actually act on it — rather than every coarse role='admin' user
+    # here. Two separate calls for the same event previously double-notified
+    # any admin who satisfied both selections.
 
     await db.commit()
     await db.refresh(request)
