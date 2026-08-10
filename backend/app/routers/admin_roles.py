@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_client_ip
-from app.core.permissions import require_permission
+from app.core.permissions import require_any_permission, require_permission
 from app.models.user import User
 from app.schemas.admin_roles import RoleCreate, RolePublic, RoleUpdate
 from app.services import admin_roles_service
@@ -25,7 +25,7 @@ def _to_public(role, user_count: int) -> RolePublic:
 
 @router.get("", response_model=list[RolePublic])
 async def list_roles(
-    current_user: User = Depends(require_permission("Manage Roles")),
+    current_user: User = Depends(require_any_permission("Manage Roles", "Manage Users")),
     db: AsyncSession = Depends(get_db),
 ):
     rows = await admin_roles_service.list_roles(db)

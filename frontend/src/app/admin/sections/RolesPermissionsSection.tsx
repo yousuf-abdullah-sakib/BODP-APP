@@ -8,7 +8,10 @@ import { deleteRole, getRoles } from "@/lib/api/admin-roles";
 import RoleModal from "./RoleModal";
 import type { RolePublic } from "@/lib/types/admin-roles";
 
-const SYSTEM_ROLES = new Set(["Administrator", "User"]);
+// Mirrors backend/app/services/admin_roles_service.py's _SYSTEM_ROLE_NAMES —
+// these can't be deleted or renamed; their permissions (except
+// Administrator's, which are always full) stay editable here.
+const SYSTEM_ROLES = new Set(["Administrator", "User", "Data Manager", "Reviewer", "Content Editor"]);
 
 export default function RolesPermissionsSection() {
   const { toast } = useToast();

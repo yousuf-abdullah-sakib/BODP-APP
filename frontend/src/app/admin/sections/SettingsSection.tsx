@@ -324,7 +324,7 @@ export default function SettingsSection() {
                   <div className="act-dot">👤</div>
                   <div>
                     <div className="act-text">
-                      <b>{m.name}</b> — {m.role_label ?? "Administrator"}
+                      <b>{m.full_name}</b> — {m.roles.join(", ") || "Administrator"}
                     </div>
                     <div className="act-time">{m.email}</div>
                   </div>

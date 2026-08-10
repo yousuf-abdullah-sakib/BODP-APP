@@ -5,15 +5,18 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditActionType
-from app.models.user import Role, User, UserRole
+from app.models.user import PERMISSION_LIST, Role, User, UserRole
 from app.schemas.admin_roles import RoleCreate, RoleUpdate
 from app.services.audit_service import write_audit_log
 
-# The two roles the seeding migration guarantees exist in every environment
-# — protected from deletion since permission-gated endpoints (including
-# this router's own) rely on "Administrator" existing and holding every
-# permission.
-_SYSTEM_ROLE_NAMES = {"Administrator", "User"}
+# The roles the seeding migrations guarantee exist in every environment —
+# protected from deletion/rename. "Administrator" and "User" are relied on
+# by name elsewhere (assign_role's coarse-role sync, permission-gated
+# endpoints assuming "Administrator" holds every permission); "Data
+# Manager"/"Reviewer"/"Content Editor" are the fixed set of admin-panel
+# roles the product explicitly calls for — permissions on all three stay
+# fully editable via update_role, only the name/deletion are locked.
+_SYSTEM_ROLE_NAMES = {"Administrator", "User", "Data Manager", "Reviewer", "Content Editor"}
 
 
 async def list_roles(db: AsyncSession) -> list[tuple[Role, int]]:
@@ -79,6 +82,15 @@ async def update_role(
         and updates["name"] != role.name
     ):
         raise HTTPException(status_code=409, detail="Cannot rename a system-seeded role")
+
+    # "Administrator" always holds every permission — this is the hard
+    # guarantee the rest of the system relies on (e.g. every
+    # permission-gated endpoint assumes an Administrator can reach it).
+    # Silently coerce rather than reject, so a client that only meant to
+    # change the description doesn't get a spurious error for permissions
+    # it never touched.
+    if role.name == "Administrator" and "permissions" in updates:
+        updates["permissions"] = list(PERMISSION_LIST)
 
     for field, value in updates.items():
         setattr(role, field, value)

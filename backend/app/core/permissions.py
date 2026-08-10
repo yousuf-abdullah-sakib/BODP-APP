@@ -72,3 +72,31 @@ async def require_admin(current_user: User = Depends(get_current_user)) -> User:
             detail="Admin access required",
         )
     return current_user
+
+
+def require_any_permission(*permissions: str) -> Callable:
+    """Like require_permission, but passes if the caller holds ANY one of
+    the given permissions — for endpoints that are a genuine read
+    dependency of more than one admin workflow. Currently used by
+    `GET /admin/roles`: Admin Management (gated on "Manage Users") needs to
+    read the role list to populate its assign-role UI, without requiring
+    the heavier "Manage Roles" permission just to see role names."""
+
+    async def _dependency(
+        current_user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        if current_user.role != UserRoleEnum.ADMIN.value:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin access required",
+            )
+        user_permissions = await _get_user_permissions(current_user, db)
+        if not user_permissions.intersection(permissions):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing required permission: one of {', '.join(permissions)}",
+            )
+        return current_user
+
+    return _dependency

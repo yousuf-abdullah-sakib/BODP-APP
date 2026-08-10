@@ -51,6 +51,32 @@ class TestRoleCrud:
         )
         assert r.status_code == 403
 
+    async def test_list_accepts_manage_users_or_manage_roles(self, client):
+        # GET /admin/roles is a read dependency of Admin Management's
+        # assign-role UI (gated on "Manage Users"), not just the Roles &
+        # Permissions screen (gated on "Manage Roles") — an admin with
+        # only one of the two must still be able to read the role list.
+        manage_users_headers = await _admin_headers(client, permissions=["Manage Users"])
+        r = await client.get("/api/v1/admin/roles", headers=manage_users_headers)
+        assert r.status_code == 200
+
+        manage_roles_headers = await _admin_headers(client, permissions=["Manage Roles"])
+        r = await client.get("/api/v1/admin/roles", headers=manage_roles_headers)
+        assert r.status_code == 200
+
+        neither_headers = await _admin_headers(client, permissions=["Edit Datasets"])
+        r = await client.get("/api/v1/admin/roles", headers=neither_headers)
+        assert r.status_code == 403
+
+        # Create/update/delete stay Manage-Roles-only — the broadened gate
+        # is read-only.
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "Should Fail", "permissions": []},
+            headers=manage_users_headers,
+        )
+        assert r.status_code == 403
+
     async def test_unknown_permission_rejected(self, client):
         headers = await _admin_headers(client, permissions=["Manage Roles"])
         r = await client.post(
@@ -218,10 +244,13 @@ class TestAdministratorRoleSyncsCoarseAccess:
         r = await client.get("/api/v1/admin/overview", headers=target_headers)
         assert r.status_code == 403
 
-    async def test_other_roles_never_grant_coarse_admin_access(self, client):
-        # A non-Administrator Role — even one granting many permissions —
-        # must never flip the coarse role column. Only the Role literally
-        # named "Administrator" does.
+    async def test_any_non_user_role_grants_coarse_admin_access(self, client):
+        # ANY Role other than the seeded "User" role grants coarse admin
+        # access — not just "Administrator". This is what makes assigning
+        # e.g. "Content Editor" (one of the 4 fixed admin-panel roles)
+        # actually usable: without the coarse flip, require_permission's
+        # first check (role == 'admin') would reject the user before ever
+        # looking at their real "Manage CMS" permission.
         admin_headers = await _admin_headers(client, permissions=["Manage Roles", "Manage Users"])
 
         r = await client.post(
@@ -245,11 +274,77 @@ class TestAdministratorRoleSyncsCoarseAccess:
 
         async with AsyncSessionLocal() as db:
             user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
+            assert user.role == "admin"
+
+        target_headers = {"Authorization": f"Bearer {target_token}"}
+        # Real access to what this role actually grants.
+        r = await client.get("/api/v1/admin/cms/blocks?page=home", headers=target_headers)
+        assert r.status_code == 200
+        # Still rejected for a permission this role does NOT grant.
+        r = await client.get("/api/v1/admin/audit-log", headers=target_headers)
+        assert r.status_code == 403
+
+    async def test_user_role_never_grants_coarse_admin_access(self, client):
+        # The one Role that must NEVER flip the coarse column — it
+        # represents a plain researcher account by definition.
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles", "Manage Users"])
+
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "User", "permissions": []},
+            headers=admin_headers,
+        )
+        role_id = r.json()["id"]
+
+        target_token = await register_verified_user(client, email="plain-user@example.com")
+        async with AsyncSessionLocal() as db:
+            user = (
+                await db.execute(select(User).where(User.email == "plain-user@example.com"))
+            ).scalar_one()
+            user_id = str(user.id)
+
+        r = await client.post(
+            f"/api/v1/admin/users/{user_id}/roles/{role_id}", headers=admin_headers
+        )
+        assert r.status_code == 204
+
+        async with AsyncSessionLocal() as db:
+            user = (await db.execute(select(User).where(User.id == user_id))).scalar_one()
             assert user.role == "user"
 
-        # No coarse admin access — require_permission's first check (role
-        # == 'admin') rejects before even looking at the fine-grained
-        # permission the role actually grants.
         target_headers = {"Authorization": f"Bearer {target_token}"}
-        r = await client.get("/api/v1/admin/cms/blocks?page=home", headers=target_headers)
+        r = await client.get("/api/v1/admin/overview", headers=target_headers)
         assert r.status_code == 403
+
+    async def test_administrator_permissions_are_locked(self, client):
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles"])
+        r = await client.post(
+            "/api/v1/admin/roles",
+            json={"name": "Administrator", "permissions": list(PERMISSION_LIST)},
+            headers=admin_headers,
+        )
+        role_id = r.json()["id"]
+
+        # Attempting to strip permissions is silently coerced back to the
+        # full list — Administrator always holds every permission.
+        r = await client.patch(
+            f"/api/v1/admin/roles/{role_id}",
+            json={"permissions": ["Manage Users"]},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200
+        assert set(r.json()["permissions"]) == set(PERMISSION_LIST)
+
+    async def test_cannot_rename_the_three_new_admin_roles(self, client):
+        admin_headers = await _admin_headers(client, permissions=["Manage Roles"])
+        for name in ("Data Manager", "Reviewer", "Content Editor"):
+            r = await client.post(
+                "/api/v1/admin/roles", json={"name": name, "permissions": []}, headers=admin_headers
+            )
+            role_id = r.json()["id"]
+            r = await client.patch(
+                f"/api/v1/admin/roles/{role_id}", json={"name": f"Not {name}"}, headers=admin_headers
+            )
+            assert r.status_code == 409, name
+            r = await client.delete(f"/api/v1/admin/roles/{role_id}", headers=admin_headers)
+            assert r.status_code == 409, name

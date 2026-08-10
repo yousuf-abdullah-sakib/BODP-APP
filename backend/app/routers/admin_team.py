@@ -1,14 +1,15 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.deps import get_client_ip
 from app.core.permissions import require_permission
-from app.models.user import User
-from app.schemas.admin_team import AdminTeamMemberCreate, AdminTeamMemberPublic, AdminTeamMemberUpdate
+from app.models.user import User, UserRoleEnum
+from app.schemas.admin_team import AdminInviteCreate, AdminTeamMemberPublic
 from app.services import admin_team_service
+from app.services.admin_users_service import get_user_for_admin
 
 router = APIRouter(prefix="/admin/team", tags=["admin-team"])
 
@@ -23,7 +24,7 @@ async def list_admin_team(
 
 @router.post("", response_model=AdminTeamMemberPublic, status_code=status.HTTP_201_CREATED)
 async def invite_admin(
-    payload: AdminTeamMemberCreate,
+    payload: AdminInviteCreate,
     request: Request,
     current_user: User = Depends(require_permission("Manage Users")),
     db: AsyncSession = Depends(get_db),
@@ -33,29 +34,17 @@ async def invite_admin(
     )
 
 
-@router.patch("/{member_id}", response_model=AdminTeamMemberPublic)
-async def update_admin_team_member(
-    member_id: uuid.UUID,
-    payload: AdminTeamMemberUpdate,
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_admin(
+    user_id: uuid.UUID,
     request: Request,
     current_user: User = Depends(require_permission("Manage Users")),
     db: AsyncSession = Depends(get_db),
 ):
-    member = await admin_team_service.get_admin_team_member(db, member_id)
-    return await admin_team_service.update_admin_team_member(
-        db, member=member, payload=payload, actor=current_user, ip_address=get_client_ip(request)
-    )
-
-
-@router.delete("/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def remove_admin_team_member(
-    member_id: uuid.UUID,
-    request: Request,
-    current_user: User = Depends(require_permission("Manage Users")),
-    db: AsyncSession = Depends(get_db),
-):
-    member = await admin_team_service.get_admin_team_member(db, member_id)
-    await admin_team_service.remove_admin_team_member(
-        db, member=member, actor=current_user, ip_address=get_client_ip(request)
+    user = await get_user_for_admin(db, user_id)
+    if user.role != UserRoleEnum.ADMIN.value:
+        raise HTTPException(status_code=404, detail="Admin not found")
+    await admin_team_service.remove_admin(
+        db, user=user, actor=current_user, ip_address=get_client_ip(request)
     )
     return None

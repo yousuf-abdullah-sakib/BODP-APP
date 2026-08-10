@@ -1,13 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Modal from "@/components/ui/Modal";
 import { useToast } from "@/context/ToastContext";
 import { ApiError } from "@/lib/api/client";
-import { inviteAdmin, updateAdminTeamMember } from "@/lib/api/admin-team";
+import { inviteAdmin } from "@/lib/api/admin-team";
+import { assignRole, unassignRole } from "@/lib/api/admin-users";
+import { getRoles } from "@/lib/api/admin-roles";
 import type { AdminTeamMemberPublic } from "@/lib/types/admin-team";
-
-const ADMIN_ROLES = ["Administrator", "Data Manager", "Reviewer", "Content Editor"];
+import type { RolePublic } from "@/lib/types/admin-roles";
 
 interface AdminTeamModalProps {
   member: AdminTeamMemberPublic | null;
@@ -18,25 +19,57 @@ interface AdminTeamModalProps {
 export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamModalProps) {
   const { toast } = useToast();
   const isNew = !member;
-  const [name, setName] = useState(member?.name ?? "");
+  const [fullName, setFullName] = useState(member?.full_name ?? "");
   const [email, setEmail] = useState(member?.email ?? "");
-  const [roleLabel, setRoleLabel] = useState(member?.role_label ?? ADMIN_ROLES[0]);
-  const [status, setStatus] = useState(member?.status ?? "active");
+  const [roles, setRoles] = useState<RolePublic[]>([]);
+  const [loadingRoles, setLoadingRoles] = useState(true);
+  // New invite: single role. Existing admin: a toggleable set (a user can
+  // hold more than one admin-panel Role, e.g. Reviewer + Content Editor).
+  const [selectedRoleId, setSelectedRoleId] = useState("");
+  const [selectedRoleNames, setSelectedRoleNames] = useState<Set<string>>(
+    new Set(member?.roles ?? [])
+  );
   const [saving, setSaving] = useState(false);
 
+  useEffect(() => {
+    getRoles()
+      .then((all) => {
+        // "User" is the plain-researcher role — Admin Management only
+        // ever assigns admin-panel roles. Roles & Permissions is where
+        // "User" itself would be managed, if that's ever needed.
+        const adminRoles = all.filter((r) => r.name !== "User");
+        setRoles(adminRoles);
+        if (isNew && adminRoles.length > 0) setSelectedRoleId(adminRoles[0].id);
+      })
+      .catch(() => toast("Failed to load roles.", "error"))
+      .finally(() => setLoadingRoles(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function save() {
-    if (!name.trim() || (isNew && !email.trim())) {
+    if (!fullName.trim() || (isNew && !email.trim())) {
       toast("Name and email are required.", "error");
+      return;
+    }
+    if (isNew && !selectedRoleId) {
+      toast("Please select a role.", "error");
       return;
     }
     setSaving(true);
     try {
       if (isNew) {
-        await inviteAdmin({ name: name.trim(), email: email.trim(), role_label: roleLabel });
+        await inviteAdmin({ full_name: fullName.trim(), email: email.trim(), role_id: selectedRoleId });
+        toast("Admin invited.", "success");
       } else {
-        await updateAdminTeamMember(member.id, { name: name.trim(), role_label: roleLabel, status });
+        const before = new Set(member.roles);
+        const toAdd = roles.filter((r) => selectedRoleNames.has(r.name) && !before.has(r.name));
+        const toRemove = roles.filter((r) => !selectedRoleNames.has(r.name) && before.has(r.name));
+        await Promise.all([
+          ...toAdd.map((r) => assignRole(member.id, r.id)),
+          ...toRemove.map((r) => unassignRole(member.id, r.id)),
+        ]);
+        toast("Admin roles updated.", "success");
       }
-      toast(isNew ? "Admin invited." : "Admin updated.", "success");
       onSaved();
       onClose();
     } catch (err) {
@@ -44,6 +77,15 @@ export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamMo
     } finally {
       setSaving(false);
     }
+  }
+
+  function toggleRole(name: string) {
+    setSelectedRoleNames((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
   }
 
   return (
@@ -55,7 +97,7 @@ export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamMo
           <button className="btn-cancel" onClick={onClose} disabled={saving}>
             Cancel
           </button>
-          <button className="btn-submit" onClick={save} disabled={saving}>
+          <button className="btn-submit" onClick={save} disabled={saving || loadingRoles}>
             {saving ? "Saving…" : isNew ? "Send Invite" : "Save Changes"}
           </button>
         </>
@@ -63,7 +105,12 @@ export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamMo
     >
       <div className="form-group">
         <label className="form-label">Name *</label>
-        <input className="form-input" value={name} onChange={(e) => setName(e.target.value)} />
+        <input
+          className="form-input"
+          value={fullName}
+          onChange={(e) => setFullName(e.target.value)}
+          disabled={!isNew}
+        />
       </div>
       <div className="form-group">
         <label className="form-label">Email *</label>
@@ -75,27 +122,54 @@ export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamMo
           disabled={!isNew}
         />
       </div>
-      <div className="form-row">
+
+      {isNew ? (
         <div className="form-group">
           <label className="form-label">Role</label>
-          <select className="form-select" value={roleLabel ?? ADMIN_ROLES[0]} onChange={(e) => setRoleLabel(e.target.value)}>
-            {ADMIN_ROLES.map((r) => (
-              <option key={r} value={r}>
-                {r}
+          <select
+            className="form-select"
+            value={selectedRoleId}
+            onChange={(e) => setSelectedRoleId(e.target.value)}
+            disabled={loadingRoles}
+          >
+            {roles.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}
               </option>
             ))}
           </select>
+          <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
+            Permissions for this role are defined in Roles &amp; Permissions.
+          </p>
         </div>
-        {!isNew && (
-          <div className="form-group">
-            <label className="form-label">Status</label>
-            <select className="form-select" value={status} onChange={(e) => setStatus(e.target.value)}>
-              <option value="active">Active</option>
-              <option value="suspended">Suspended</option>
-            </select>
-          </div>
-        )}
-      </div>
+      ) : (
+        <div className="form-group">
+          <label className="form-label">Roles</label>
+          {loadingRoles ? (
+            <p style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Loading roles…</p>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {roles.map((r) => (
+                <label
+                  key={r.id}
+                  style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.85rem" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedRoleNames.has(r.name)}
+                    onChange={() => toggleRole(r.name)}
+                  />
+                  {r.name}
+                </label>
+              ))}
+            </div>
+          )}
+          <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "0.5rem" }}>
+            Permissions for each role are defined in Roles &amp; Permissions.
+          </p>
+        </div>
+      )}
+
       {isNew && (
         <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", lineHeight: 1.6 }}>
           An email will be sent with a link to set their password.

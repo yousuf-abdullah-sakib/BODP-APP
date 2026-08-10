@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useConfirm } from "@/context/ConfirmContext";
 import { useToast } from "@/context/ToastContext";
 import { ApiError } from "@/lib/api/client";
-import { getAdminTeam, removeAdminTeamMember } from "@/lib/api/admin-team";
+import { getAdminTeam, removeAdmin } from "@/lib/api/admin-team";
 import AdminTeamModal from "./AdminTeamModal";
 import type { AdminTeamMemberPublic } from "@/lib/types/admin-team";
 
@@ -33,7 +33,7 @@ export default function AdminManagementSection() {
       title: "Remove Admin",
       message: (
         <>
-          Remove <b>{m.name}</b> from the admin team? They will lose administrator access immediately.
+          Suspend <b>{m.full_name}</b>? They will lose administrator access immediately.
         </>
       ),
       confirmLabel: "Remove",
@@ -41,8 +41,8 @@ export default function AdminManagementSection() {
     });
     if (!ok) return;
     try {
-      await removeAdminTeamMember(m.id);
-      toast(`${m.name} removed from admin team.`, "info");
+      await removeAdmin(m.id);
+      toast(`${m.full_name} removed from admin team.`, "info");
       refetch();
     } catch (err) {
       toast(err instanceof ApiError ? err.message : "Failed to remove admin.", "error");
@@ -78,7 +78,7 @@ export default function AdminManagementSection() {
               <tr>
                 <th>Name</th>
                 <th>Email</th>
-                <th>Role</th>
+                <th>Roles</th>
                 <th>Last Active</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -87,10 +87,20 @@ export default function AdminManagementSection() {
             <tbody>
               {team.map((m) => (
                 <tr key={m.id}>
-                  <td style={{ fontWeight: 600 }}>{m.name}</td>
+                  <td style={{ fontWeight: 600 }}>{m.full_name}</td>
                   <td style={{ fontSize: "0.82rem" }}>{m.email}</td>
                   <td>
-                    <span className="chip">{m.role_label ?? "—"}</span>
+                    <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
+                      {m.roles.length > 0 ? (
+                        m.roles.map((r) => (
+                          <span className="chip" key={r}>
+                            {r}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="chip">—</span>
+                      )}
+                    </div>
                   </td>
                   <td style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
                     {m.last_active_at ? new Date(m.last_active_at).toLocaleString() : "Never"}

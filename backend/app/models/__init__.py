@@ -1,6 +1,5 @@
 from app.models.admin import (
     AboutTeamMember,
-    AdminTeamMember,
     Backup,
     BlogPost,
     BoundaryShapefile,
@@ -49,7 +48,6 @@ __all__ = [
     "MediaFile",
     "CmsBlock",
     "AboutTeamMember",
-    "AdminTeamMember",
     "Report",
     "Backup",
     "SiteSettings",

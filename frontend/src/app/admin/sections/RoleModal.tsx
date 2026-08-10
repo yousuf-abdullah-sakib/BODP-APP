@@ -8,6 +8,9 @@ import { createRole, updateRole } from "@/lib/api/admin-roles";
 import { PERMISSION_LIST } from "@/lib/types/admin-roles";
 import type { RolePublic } from "@/lib/types/admin-roles";
 
+// Mirrors backend/app/services/admin_roles_service.py's _SYSTEM_ROLE_NAMES.
+const SYSTEM_ROLE_NAMES = new Set(["Administrator", "User", "Data Manager", "Reviewer", "Content Editor"]);
+
 interface RoleModalProps {
   role: RolePublic | null;
   onClose: () => void;
@@ -17,6 +20,11 @@ interface RoleModalProps {
 export default function RoleModal({ role, onClose, onSaved }: RoleModalProps) {
   const { toast } = useToast();
   const isNew = !role;
+  const isSystemRole = !!role && SYSTEM_ROLE_NAMES.has(role.name);
+  // Administrator always holds every permission — enforced server-side too
+  // (admin_roles_service.update_role coerces this regardless), locked here
+  // so the checkboxes don't even suggest it's changeable.
+  const isAdministrator = role?.name === "Administrator";
   const [name, setName] = useState(role?.name ?? "");
   const [description, setDescription] = useState(role?.description ?? "");
   const [permissions, setPermissions] = useState<Set<string>>(new Set(role?.permissions ?? []));
@@ -71,7 +79,17 @@ export default function RoleModal({ role, onClose, onSaved }: RoleModalProps) {
     >
       <div className="form-group">
         <label className="form-label">Role Name *</label>
-        <input className="form-input" value={name} onChange={(e) => setName(e.target.value)} />
+        <input
+          className="form-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          disabled={isSystemRole}
+        />
+        {isSystemRole && (
+          <p style={{ fontSize: "0.76rem", color: "var(--text-muted)", marginTop: "0.3rem" }}>
+            This role&apos;s name can&apos;t be changed.
+          </p>
+        )}
       </div>
       <div className="form-group">
         <label className="form-label">Description</label>
@@ -79,11 +97,25 @@ export default function RoleModal({ role, onClose, onSaved }: RoleModalProps) {
       </div>
       <div className="form-group">
         <label className="form-label">Permissions</label>
+        {isAdministrator && (
+          <p style={{ fontSize: "0.76rem", color: "var(--text-muted)", marginBottom: "0.5rem" }}>
+            Administrator always has every permission.
+          </p>
+        )}
         <div className="req-dataset-list">
           {PERMISSION_LIST.map((p) => (
-            <label key={p} className="req-dataset-row" style={{ cursor: "pointer" }}>
+            <label
+              key={p}
+              className="req-dataset-row"
+              style={{ cursor: isAdministrator ? "not-allowed" : "pointer" }}
+            >
               <span style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                <input type="checkbox" checked={permissions.has(p)} onChange={() => toggle(p)} />
+                <input
+                  type="checkbox"
+                  checked={isAdministrator ? true : permissions.has(p)}
+                  onChange={() => toggle(p)}
+                  disabled={isAdministrator}
+                />
                 {p}
               </span>
             </label>

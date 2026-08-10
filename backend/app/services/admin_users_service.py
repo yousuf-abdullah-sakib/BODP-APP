@@ -136,13 +136,14 @@ async def assign_role(
 
     db.add(UserRole(user_id=user.id, role_id=role.id))
 
-    # The "Administrator" fine-grained Role is the single source of truth for
-    # coarse admin access — require_permission() checks BOTH `user.role ==
-    # 'admin'` AND the fine-grained permission, so a user assigned this Role
+    # Any Role other than the seeded "User" role grants coarse admin access
+    # — require_permission() checks BOTH `user.role == 'admin'` AND the
+    # fine-grained permission, so a user assigned e.g. "Data Manager"
     # without also being flipped to the coarse admin role would still get
-    # 403'd everywhere. The other seeded/custom Roles stay purely additive
-    # permission grants and never touch the coarse role.
-    if role.name == "Administrator":
+    # 403'd on every admin-panel endpoint despite holding the right
+    # permission. "User" is the one Role that represents a plain
+    # researcher account and must never grant admin-panel entry.
+    if role.name != "User":
         user.role = UserRoleEnum.ADMIN.value
 
     await write_audit_log(
@@ -168,16 +169,18 @@ async def unassign_role(
 
     await db.delete(user_role)
 
-    # Mirror of the sync in assign_role above — losing the Administrator
-    # Role drops the user back to a plain researcher account. Uses a flush
-    # so the DELETE above is visible to this membership re-check rather
-    # than counting the row we're in the middle of removing.
-    if role.name == "Administrator":
+    # Mirror of the sync in assign_role above — losing an admin-panel Role
+    # (anything but "User") drops the user back to a plain researcher
+    # account, but only once NO admin-panel Role remains (a user can hold
+    # more than one, e.g. both "Reviewer" and "Content Editor"). Uses a
+    # flush so the DELETE above is visible to this membership re-check
+    # rather than counting the row we're in the middle of removing.
+    if role.name != "User":
         await db.flush()
         remaining = await db.execute(
             select(UserRole)
             .join(Role, Role.id == UserRole.role_id)
-            .where(UserRole.user_id == user.id, Role.name == "Administrator")
+            .where(UserRole.user_id == user.id, Role.name != "User")
         )
         if remaining.scalar_one_or_none() is None:
             user.role = UserRoleEnum.USER.value
