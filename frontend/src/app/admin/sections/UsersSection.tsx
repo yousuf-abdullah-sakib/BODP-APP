@@ -4,7 +4,16 @@ import { useEffect, useState } from "react";
 import { useConfirm } from "@/context/ConfirmContext";
 import { useToast } from "@/context/ToastContext";
 import { ApiError } from "@/lib/api/client";
-import { activateUser, exportUsersCsv, getAdminUser, getAdminUsers, suspendUser } from "@/lib/api/admin-users";
+import {
+  activateUser,
+  cancelDeletionRequest,
+  deleteUser,
+  exportUsersCsv,
+  getAdminUser,
+  getAdminUsers,
+  getPendingDeletionRequests,
+  suspendUser,
+} from "@/lib/api/admin-users";
 import UserDetailModal from "./UserDetailModal";
 import UserModal from "./UserModal";
 import type { AdminUserDetail, AdminUserSummary } from "@/lib/types/admin-users";
@@ -12,7 +21,9 @@ import type { AdminUserDetail, AdminUserSummary } from "@/lib/types/admin-users"
 export default function UsersSection() {
   const { toast } = useToast();
   const confirm = useConfirm();
+  const [view, setView] = useState<"all" | "deletion-requests">("all");
   const [users, setUsers] = useState<AdminUserSummary[]>([]);
+  const [deletionRequests, setDeletionRequests] = useState<AdminUserSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -20,6 +31,7 @@ export default function UsersSection() {
   const [editing, setEditing] = useState<AdminUserSummary | null | "new">(null);
   const [viewing, setViewing] = useState<AdminUserDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   function refetch() {
     setLoading(true);
@@ -29,10 +41,58 @@ export default function UsersSection() {
       .finally(() => setLoading(false));
   }
 
+  function refetchDeletionRequests() {
+    getPendingDeletionRequests()
+      .then(setDeletionRequests)
+      .catch(() => {});
+  }
+
   useEffect(() => {
     refetch();
+    refetchDeletionRequests();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search]);
+
+  async function handleCancelDeletionRequest(u: AdminUserSummary) {
+    setBusyId(u.id);
+    try {
+      await cancelDeletionRequest(u.id);
+      toast(`Deletion request cancelled for ${u.full_name}.`, "success");
+      refetchDeletionRequests();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to cancel deletion request.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete(u: AdminUserSummary) {
+    const ok = await confirm({
+      title: "Permanently Delete Account",
+      message: (
+        <>
+          Permanently delete <b>{u.full_name}</b>&apos;s account? This cannot be undone — their
+          personal information (including email) will be erased and <b>{u.email}</b> will become
+          available for a new registration. If you only want to revoke access for now, use Suspend
+          instead.
+        </>
+      ),
+      confirmLabel: "Delete Permanently",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusyId(u.id);
+    try {
+      await deleteUser(u.id);
+      toast(`${u.full_name} permanently deleted.`, "info");
+      refetch();
+      refetchDeletionRequests();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to delete user.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
 
   function toggle(id: string) {
     setSelected((prev) => {
@@ -125,31 +185,103 @@ export default function UsersSection() {
         </div>
       </div>
 
-      <div className="filter-toolbar">
-        <input
-          type="text"
-          placeholder="Search by name or email…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
+      <div className="filter-tab-row">
+        <button className={`filter-tab-btn${view === "all" ? " active" : ""}`} onClick={() => setView("all")}>
+          All Users ({users.length})
+        </button>
+        <button
+          className={`filter-tab-btn${view === "deletion-requests" ? " active" : ""}`}
+          onClick={() => setView("deletion-requests")}
+        >
+          Deletion Requests ({deletionRequests.length})
+        </button>
       </div>
 
-      <div className={`bulk-bar${selected.size > 0 ? " visible" : ""}`}>
-        <span>{selected.size} selected</span>
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button className="btn-outline" style={{ padding: "0.3rem 0.8rem", fontSize: "0.78rem" }} onClick={handleBulkActivate}>
-            ▶ Activate
-          </button>
-          <button className="btn-danger-sm" onClick={handleBulkSuspend}>
-            ⏸ Suspend
-          </button>
-          <button className="btn-cancel" onClick={() => setSelected(new Set())}>
-            Clear
-          </button>
+      {view === "all" && (
+        <div className="filter-toolbar">
+          <input
+            type="text"
+            placeholder="Search by name or email…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
         </div>
-      </div>
+      )}
 
-      {error ? (
+      {view === "all" && (
+        <div className={`bulk-bar${selected.size > 0 ? " visible" : ""}`}>
+          <span>{selected.size} selected</span>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button className="btn-outline" style={{ padding: "0.3rem 0.8rem", fontSize: "0.78rem" }} onClick={handleBulkActivate}>
+              ▶ Activate
+            </button>
+            <button className="btn-danger-sm" onClick={handleBulkSuspend}>
+              ⏸ Suspend
+            </button>
+            <button className="btn-cancel" onClick={() => setSelected(new Set())}>
+              Clear
+            </button>
+          </div>
+        </div>
+      )}
+
+      {view === "deletion-requests" ? (
+        deletionRequests.length === 0 ? (
+          <div className="empty-state">
+            <div className="es-icon">🗑️</div>
+            <p>No pending account deletion requests.</p>
+          </div>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Requested</th>
+                  <th>Status</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {deletionRequests.map((u) => (
+                  <tr key={u.id}>
+                    <td>
+                      <div style={{ fontWeight: 600 }}>{u.full_name}</div>
+                      <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{u.email}</div>
+                    </td>
+                    <td style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
+                      {u.deletion_requested_at ? new Date(u.deletion_requested_at).toLocaleDateString() : "—"}
+                    </td>
+                    <td>
+                      <span className={`badge badge-${u.status === "active" ? "approved" : "suspended"}`}>{u.status}</span>
+                    </td>
+                    <td>
+                      <div className="flex-gap">
+                        <button
+                          className="btn-icon-sm"
+                          title="Cancel deletion request"
+                          disabled={busyId === u.id}
+                          onClick={() => handleCancelDeletionRequest(u)}
+                        >
+                          ↺
+                        </button>
+                        <button
+                          className="btn-icon-sm danger"
+                          title="Delete now"
+                          disabled={busyId === u.id}
+                          onClick={() => handleDelete(u)}
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : error ? (
         <div className="empty-state">
           <div className="es-icon">⚠️</div>
           <p>{error}</p>
@@ -191,7 +323,17 @@ export default function UsersSection() {
                     <input type="checkbox" checked={selected.has(u.id)} onChange={() => toggle(u.id)} />
                   </td>
                   <td>
-                    <div style={{ fontWeight: 600 }}>{u.full_name}</div>
+                    <div style={{ fontWeight: 600 }}>
+                      {u.full_name}
+                      {u.deletion_requested_at && (
+                        <span
+                          className="badge badge-suspended"
+                          style={{ marginLeft: "0.5rem", fontSize: "0.65rem" }}
+                        >
+                          deletion requested
+                        </span>
+                      )}
+                    </div>
                     <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>{u.email}</div>
                   </td>
                   <td style={{ fontSize: "0.82rem" }}>{u.institution ?? "—"}</td>
@@ -231,6 +373,14 @@ export default function UsersSection() {
                           ▶
                         </button>
                       )}
+                      <button
+                        className="btn-icon-sm danger"
+                        title="Permanently delete"
+                        disabled={busyId === u.id}
+                        onClick={() => handleDelete(u)}
+                      >
+                        🗑
+                      </button>
                     </div>
                   </td>
                 </tr>

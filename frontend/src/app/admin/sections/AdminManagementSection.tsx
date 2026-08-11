@@ -4,7 +4,13 @@ import { useEffect, useState } from "react";
 import { useConfirm } from "@/context/ConfirmContext";
 import { useToast } from "@/context/ToastContext";
 import { ApiError } from "@/lib/api/client";
-import { getAdminTeam, removeAdmin } from "@/lib/api/admin-team";
+import {
+  getAdminTeam,
+  reactivateAdmin,
+  removeAdmin,
+  resendAdminInvite,
+  suspendAdmin,
+} from "@/lib/api/admin-team";
 import AdminTeamModal from "./AdminTeamModal";
 import type { AdminTeamMemberPublic } from "@/lib/types/admin-team";
 
@@ -15,6 +21,7 @@ export default function AdminManagementSection() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<AdminTeamMemberPublic | null | "new">(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
   function refetch() {
     setLoading(true);
@@ -28,24 +35,83 @@ export default function AdminManagementSection() {
     refetch();
   }, []);
 
-  async function handleRemove(m: AdminTeamMemberPublic) {
+  async function handleSuspend(m: AdminTeamMemberPublic) {
     const ok = await confirm({
-      title: "Remove Admin",
+      title: "Suspend Admin",
       message: (
         <>
-          Suspend <b>{m.full_name}</b>? They will lose administrator access immediately.
+          Suspend <b>{m.full_name}</b>? They will lose administrator access immediately, but their
+          account and roles stay intact — you can reactivate them later.
         </>
       ),
-      confirmLabel: "Remove",
+      confirmLabel: "Suspend",
       danger: true,
     });
     if (!ok) return;
+    setBusyId(m.id);
     try {
-      await removeAdmin(m.id);
-      toast(`${m.full_name} removed from admin team.`, "info");
+      await suspendAdmin(m.id);
+      toast(`${m.full_name} suspended.`, "info");
       refetch();
     } catch (err) {
-      toast(err instanceof ApiError ? err.message : "Failed to remove admin.", "error");
+      toast(err instanceof ApiError ? err.message : "Failed to suspend admin.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleReactivate(m: AdminTeamMemberPublic) {
+    setBusyId(m.id);
+    try {
+      await reactivateAdmin(m.id);
+      toast(`${m.full_name} reactivated.`, "success");
+      refetch();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to reactivate admin.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleResendInvite(m: AdminTeamMemberPublic) {
+    setBusyId(m.id);
+    try {
+      const { email_sent } = await resendAdminInvite(m.id);
+      toast(
+        email_sent ? `Invite email resent to ${m.email}.` : "Failed to send the invite email.",
+        email_sent ? "success" : "error"
+      );
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to resend invite.", "error");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRemove(m: AdminTeamMemberPublic) {
+    const ok = await confirm({
+      title: "Permanently Delete Admin",
+      message: (
+        <>
+          Permanently delete <b>{m.full_name}</b>&apos;s account? This cannot be undone — their
+          personal information (including email) will be erased and <b>{m.email}</b> will become
+          available for a new registration or invite. If you only want to revoke access for now,
+          use Suspend instead.
+        </>
+      ),
+      confirmLabel: "Delete Permanently",
+      danger: true,
+    });
+    if (!ok) return;
+    setBusyId(m.id);
+    try {
+      await removeAdmin(m.id);
+      toast(`${m.full_name} permanently deleted.`, "info");
+      refetch();
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to delete admin.", "error");
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -110,10 +176,49 @@ export default function AdminManagementSection() {
                   </td>
                   <td>
                     <div className="flex-gap">
-                      <button className="btn-icon-sm" title="Edit" onClick={() => setEditing(m)}>
+                      <button
+                        className="btn-icon-sm"
+                        title="Edit"
+                        disabled={busyId === m.id}
+                        onClick={() => setEditing(m)}
+                      >
                         ✎
                       </button>
-                      <button className="btn-icon-sm danger" title="Remove" onClick={() => handleRemove(m)}>
+                      {!m.last_active_at && (
+                        <button
+                          className="btn-icon-sm"
+                          title="Resend invite email"
+                          disabled={busyId === m.id}
+                          onClick={() => handleResendInvite(m)}
+                        >
+                          ✉
+                        </button>
+                      )}
+                      {m.status === "suspended" ? (
+                        <button
+                          className="btn-icon-sm"
+                          title="Reactivate"
+                          disabled={busyId === m.id}
+                          onClick={() => handleReactivate(m)}
+                        >
+                          ↻
+                        </button>
+                      ) : (
+                        <button
+                          className="btn-icon-sm"
+                          title="Suspend (reversible)"
+                          disabled={busyId === m.id}
+                          onClick={() => handleSuspend(m)}
+                        >
+                          ⏸
+                        </button>
+                      )}
+                      <button
+                        className="btn-icon-sm danger"
+                        title="Permanently delete"
+                        disabled={busyId === m.id}
+                        onClick={() => handleRemove(m)}
+                      >
                         🗑
                       </button>
                     </div>

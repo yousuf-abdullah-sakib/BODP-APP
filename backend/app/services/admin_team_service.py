@@ -63,6 +63,7 @@ async def list_admin_team(db: AsyncSession) -> list[dict]:
             "roles": roles_by_user.get(u.id, []),
             "last_active_at": last_active_by_user.get(u.id),
             "created_at": u.created_at,
+            "email_sent": None,
         }
         for u in users
     ]
@@ -83,6 +84,7 @@ async def get_admin_team_member(db: AsyncSession, user_id: uuid.UUID) -> dict:
         "roles": roles_by_user.get(user_id, []),
         "last_active_at": last_active_by_user.get(user_id),
         "created_at": user.created_at,
+        "email_sent": None,
     }
 
 
@@ -127,24 +129,46 @@ async def invite_admin(
     await db.commit()
 
     token = create_invite_token(str(user.id), user.email)
-    email_service.send_admin_invite_email(user.email, user.full_name, token, is_admin=True)
+    email_sent = email_service.send_admin_invite_email(user.email, user.full_name, token, is_admin=True)
 
-    return await get_admin_team_member(db, user.id)
+    member = await get_admin_team_member(db, user.id)
+    member["email_sent"] = email_sent
+    return member
 
 
-async def remove_admin(db: AsyncSession, *, user: User, actor: User, ip_address: str | None) -> None:
-    # Suspend (not delete) — revokes admin access immediately while
-    # staying non-destructive/reversible, matching how regular-user
-    # suspension already works. Fine-grained Role assignments are left
-    # intact (suspension alone already blocks login via auth_service), so
-    # reactivating restores the same roles rather than requiring
-    # re-assignment.
+async def resend_invite(db: AsyncSession, *, user: User) -> bool:
+    """Re-sends the set-password email with a fresh token — for when the
+    original send failed (e.g. a transient SMTP/provider outage) and the
+    admin needs a way to retry without re-creating the account."""
+    token = create_invite_token(str(user.id), user.email)
+    return email_service.send_admin_invite_email(user.email, user.full_name, token, is_admin=True)
+
+
+async def suspend_admin(db: AsyncSession, *, user: User, actor: User, ip_address: str | None) -> None:
+    # Reversible — revokes admin access immediately while keeping the
+    # account and its Role assignments intact, so reactivating restores
+    # exactly what they had before with no re-assignment needed. Distinct
+    # from remove_admin, which is permanent.
     user.status = UserStatus.SUSPENDED.value
 
     await write_audit_log(
         db,
         actor=actor,
         action="Suspended admin — access revoked",
+        action_type=AuditActionType.USER,
+        target=f"{user.full_name} ({user.email})",
+        ip_address=ip_address,
+    )
+    await db.commit()
+
+
+async def reactivate_admin(db: AsyncSession, *, user: User, actor: User, ip_address: str | None) -> None:
+    user.status = UserStatus.ACTIVE.value
+
+    await write_audit_log(
+        db,
+        actor=actor,
+        action="Reactivated admin",
         action_type=AuditActionType.USER,
         target=f"{user.full_name} ({user.email})",
         ip_address=ip_address,

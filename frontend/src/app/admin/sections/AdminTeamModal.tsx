@@ -58,16 +58,37 @@ export default function AdminTeamModal({ member, onClose, onSaved }: AdminTeamMo
     setSaving(true);
     try {
       if (isNew) {
-        await inviteAdmin({ full_name: fullName.trim(), email: email.trim(), role_id: selectedRoleId });
-        toast("Admin invited.", "success");
+        const created = await inviteAdmin({
+          full_name: fullName.trim(),
+          email: email.trim(),
+          role_id: selectedRoleId,
+        });
+        if (created.email_sent === false) {
+          toast(
+            "Admin created, but the password-setup email failed to send. Use \"Resend Invite\" once the email provider is fixed.",
+            "error"
+          );
+        } else {
+          toast("Admin invited.", "success");
+        }
       } else {
         const before = new Set(member.roles);
         const toAdd = roles.filter((r) => selectedRoleNames.has(r.name) && !before.has(r.name));
         const toRemove = roles.filter((r) => !selectedRoleNames.has(r.name) && before.has(r.name));
-        await Promise.all([
-          ...toAdd.map((r) => assignRole(member.id, r.id)),
-          ...toRemove.map((r) => unassignRole(member.id, r.id)),
-        ]);
+        // Sequential, not Promise.all — assign_role/unassign_role both
+        // read-then-write the same User.role column based on current
+        // UserRole membership. Firing them concurrently let a remove's
+        // "any roles left?" recheck run before an add's commit landed,
+        // sometimes demoting the account back to a plain user even though
+        // the intended end state (e.g. switching to Administrator) should
+        // have kept it as an admin. Adds run first so the account never
+        // passes through a zero-admin-roles moment mid-save.
+        for (const r of toAdd) {
+          await assignRole(member.id, r.id);
+        }
+        for (const r of toRemove) {
+          await unassignRole(member.id, r.id);
+        }
         toast("Admin roles updated.", "success");
       }
       onSaved();

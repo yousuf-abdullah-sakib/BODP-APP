@@ -20,6 +20,7 @@ class UserRoleEnum(StrEnum):
 class UserStatus(StrEnum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
+    DELETED = "deleted"
 
 
 # The 8 fine-grained permissions from the admin "Roles & Permissions" screen.

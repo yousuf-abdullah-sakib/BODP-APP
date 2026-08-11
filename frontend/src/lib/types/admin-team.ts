@@ -14,4 +14,7 @@ export interface AdminTeamMemberPublic {
   roles: string[];
   last_active_at: string | null;
   created_at: string;
+  // Only set on the response to inviting a new admin — whether the
+  // password-setup email actually sent. null on every other response.
+  email_sent: boolean | null;
 }

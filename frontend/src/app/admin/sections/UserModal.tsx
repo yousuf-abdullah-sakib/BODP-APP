@@ -30,20 +30,28 @@ export default function UserModal({ user, onClose, onSaved }: UserModalProps) {
     setSaving(true);
     try {
       if (isNew) {
-        await createAdminUser({
+        const created = await createAdminUser({
           full_name: fullName.trim(),
           email: email.trim(),
           institution: institution || null,
           phone: phone || null,
         });
+        if (created.email_sent === false) {
+          toast(
+            "User created, but the password-setup email failed to send. Ask them to use \"Forgot password\" once the email provider is fixed, or retry from a fresh invite.",
+            "error"
+          );
+        } else {
+          toast("User created.", "success");
+        }
       } else {
         await updateAdminUser(user.id, {
           full_name: fullName.trim(),
           institution: institution || null,
           phone: phone || null,
         });
+        toast("User updated.", "success");
       }
-      toast(isNew ? "User created." : "User updated.", "success");
       onSaved();
       onClose();
     } catch (err) {

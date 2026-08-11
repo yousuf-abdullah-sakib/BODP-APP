@@ -33,6 +33,20 @@ export async function activateUser(id: string): Promise<AdminUserDetail> {
   return apiFetch<AdminUserDetail>(`/admin/users/${id}/activate`, { method: "POST" });
 }
 
+// Permanent — anonymizes the account (email freed for reuse). Distinct
+// from suspendUser, which is reversible.
+export async function deleteUser(id: string): Promise<void> {
+  await apiFetch(`/admin/users/${id}`, { method: "DELETE" });
+}
+
+export async function getPendingDeletionRequests(): Promise<AdminUserSummary[]> {
+  return apiFetch<AdminUserSummary[]>("/admin/users/deletion-requests/pending");
+}
+
+export async function cancelDeletionRequest(id: string): Promise<AdminUserDetail> {
+  return apiFetch<AdminUserDetail>(`/admin/users/${id}/deletion-requests/cancel`, { method: "POST" });
+}
+
 export async function getUserGrants(id: string): Promise<GrantSummary[]> {
   return apiFetch<GrantSummary[]>(`/admin/users/${id}/grants`);
 }

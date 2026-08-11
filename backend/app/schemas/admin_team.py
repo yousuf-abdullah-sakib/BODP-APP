@@ -24,5 +24,8 @@ class AdminTeamMemberPublic(BaseModel):
     roles: list[str]
     last_active_at: datetime | None
     created_at: datetime
+    # Only meaningful on the response to POST (invite) — whether the
+    # password-setup email actually sent. None on every other response.
+    email_sent: bool | None = None
 
     model_config = {"from_attributes": True}

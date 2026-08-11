@@ -20,7 +20,7 @@ from app.services import admin_users_service, requests_service
 router = APIRouter(prefix="/admin/users", tags=["admin-users"])
 
 
-async def _to_detail(db: AsyncSession, user: User) -> AdminUserDetail:
+async def _to_detail(db: AsyncSession, user: User, *, email_sent: bool | None = None) -> AdminUserDetail:
     fine_grained_roles = await admin_users_service.get_fine_grained_roles(db, user.id)
     return AdminUserDetail(
         id=user.id,
@@ -34,8 +34,10 @@ async def _to_detail(db: AsyncSession, user: User) -> AdminUserDetail:
         email_verified_at=user.email_verified_at,
         bio=user.bio,
         research_area=user.research_area,
+        deletion_requested_at=user.deletion_requested_at,
         created_at=user.created_at,
         fine_grained_roles=fine_grained_roles,
+        email_sent=email_sent,
     )
 
 
@@ -63,6 +65,17 @@ async def export_users_csv(
     )
 
 
+@router.get("/deletion-requests/pending", response_model=list[AdminUserSummary])
+async def list_deletion_requests(
+    current_user: User = Depends(require_permission("Manage Users")),
+    db: AsyncSession = Depends(get_db),
+):
+    # Must be registered before GET /{user_id} — otherwise Starlette
+    # matches "deletion-requests" as a user_id path param first (see
+    # /export.csv above for the same precedent).
+    return await admin_users_service.list_pending_deletions(db)
+
+
 @router.get("/{user_id}", response_model=AdminUserDetail)
 async def get_user(
     user_id: uuid.UUID,
@@ -80,10 +93,10 @@ async def create_user(
     current_user: User = Depends(require_permission("Manage Users")),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await admin_users_service.create_user_via_invite(
+    user, email_sent = await admin_users_service.create_user_via_invite(
         db, payload=payload, actor=current_user, ip_address=get_client_ip(request)
     )
-    return await _to_detail(db, user)
+    return await _to_detail(db, user, email_sent=email_sent)
 
 
 @router.patch("/{user_id}", response_model=AdminUserDetail)
@@ -129,6 +142,39 @@ async def activate_user(
     user = await admin_users_service.get_user_for_admin(db, user_id)
     user = await admin_users_service.set_user_status(
         db, user=user, status=UserStatus.ACTIVE.value, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return await _to_detail(db, user)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Manage Users")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Permanently deletes an account (anonymizes the row — see
+    admin_users_service.anonymize_user's docstring for why this isn't a
+    hard DELETE). Distinct from /suspend, which is reversible."""
+    user = await admin_users_service.get_user_for_admin(db, user_id)
+    if user.id == current_user.id:
+        raise HTTPException(status_code=409, detail="You cannot delete your own account")
+    await admin_users_service.anonymize_user(
+        db, user=user, actor=current_user, ip_address=get_client_ip(request)
+    )
+    return None
+
+
+@router.post("/{user_id}/deletion-requests/cancel", response_model=AdminUserDetail)
+async def cancel_deletion_request(
+    user_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(require_permission("Manage Users")),
+    db: AsyncSession = Depends(get_db),
+):
+    user = await admin_users_service.get_user_for_admin(db, user_id)
+    user = await admin_users_service.cancel_deletion_request(
+        db, user=user, actor=current_user, ip_address=get_client_ip(request)
     )
     return await _to_detail(db, user)
 
