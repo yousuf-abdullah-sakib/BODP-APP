@@ -17,6 +17,7 @@ async def write_audit_log(
         AuditLogEntry(
             actor_id=actor.id,
             actor_name=actor.full_name,
+            actor_email=actor.email,
             action=action,
             action_type=action_type.value,
             target=target,

@@ -27,6 +27,7 @@ class AuditLogEntry(UUIDPKMixin, Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
     actor_name: Mapped[str | None] = mapped_column(String(255))
+    actor_email: Mapped[str | None] = mapped_column(String(320))
     action: Mapped[str] = mapped_column(String(255), nullable=False)
     action_type: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     target: Mapped[str | None] = mapped_column(String(500))

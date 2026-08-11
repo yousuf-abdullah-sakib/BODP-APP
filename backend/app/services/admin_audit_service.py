@@ -25,6 +25,7 @@ def _build_query(
             or_(
                 AuditLogEntry.action.ilike(like),
                 AuditLogEntry.actor_name.ilike(like),
+                AuditLogEntry.actor_email.ilike(like),
                 AuditLogEntry.target.ilike(like),
             )
         )
@@ -50,9 +51,17 @@ async def export_csv(db: AsyncSession, *, search: str | None, action_type: str |
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)
-    writer.writerow(["Time", "Actor", "Action", "Target", "Type", "IP Address"])
+    writer.writerow(["Time", "Actor", "Actor Email", "Action", "Target", "Type", "IP Address"])
     for e in entries:
         writer.writerow(
-            [e.created_at.isoformat(), e.actor_name or "", e.action, e.target or "", e.action_type, e.ip_address or ""]
+            [
+                e.created_at.isoformat(),
+                e.actor_name or "",
+                e.actor_email or "",
+                e.action,
+                e.target or "",
+                e.action_type,
+                e.ip_address or "",
+            ]
         )
     return buffer.getvalue()

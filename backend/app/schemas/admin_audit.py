@@ -8,6 +8,7 @@ class AuditLogEntryPublic(BaseModel):
     id: uuid.UUID
     actor_id: uuid.UUID | None
     actor_name: str | None
+    actor_email: str | None
     action: str
     action_type: str
     target: str | None

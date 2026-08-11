@@ -99,7 +99,7 @@ class TestAuditExportMatchesFilter:
         reader = csv.reader(io.StringIO(r.text))
         rows = list(reader)
         header, data_rows = rows[0], rows[1:]
-        assert header == ["Time", "Actor", "Action", "Target", "Type", "IP Address"]
+        assert header == ["Time", "Actor", "Actor Email", "Action", "Target", "Type", "IP Address"]
 
         assert len(data_rows) == 2
         type_col = header.index("Type")

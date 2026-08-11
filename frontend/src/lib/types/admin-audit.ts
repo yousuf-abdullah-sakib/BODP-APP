@@ -6,6 +6,7 @@ export interface AuditLogEntryPublic {
   id: string;
   actor_id: string | null;
   actor_name: string | null;
+  actor_email: string | null;
   action: string;
   action_type: AuditActionType;
   target: string | null;

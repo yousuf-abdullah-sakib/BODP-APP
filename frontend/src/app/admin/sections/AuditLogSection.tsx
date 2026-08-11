@@ -60,7 +60,7 @@ export default function AuditLogSection() {
       <div className="filter-toolbar">
         <input
           type="text"
-          placeholder="Search actor, action, or target…"
+          placeholder="Search actor, email, action, or target…"
           value={search}
           onChange={(e) => {
             setSearch(e.target.value);
@@ -82,45 +82,62 @@ export default function AuditLogSection() {
         </select>
       </div>
 
-      <div className="panel">
-        <div className="panel-body">
-          {loading ? (
-            <div className="empty-state">
-              <div className="es-icon">⏳</div>
-              <p>Loading audit log…</p>
-            </div>
-          ) : items.length === 0 ? (
-            <div className="empty-state">
-              <div className="es-icon">📝</div>
-              <p>No audit entries match your filters.</p>
-            </div>
-          ) : (
-            items.map((a) => (
-              <div
-                className="audit-row"
-                key={a.id}
-                style={{ "--audit-color": TYPE_STYLE[a.action_type].color } as React.CSSProperties}
-              >
-                <span className="audit-type-badge" title={a.action_type}>
-                  {TYPE_STYLE[a.action_type].icon}
-                </span>
-                <span className="audit-time" title={new Date(a.created_at).toLocaleString()}>
-                  {new Date(a.created_at).toLocaleString()}
-                </span>
-                <span className="audit-actor" title={a.actor_name ?? "—"}>
-                  {a.actor_name ?? "—"}
-                </span>
-                <span className="audit-action" title={`${a.action} — ${a.target}`}>
-                  {a.action} — <span className="text-muted">{a.target}</span>
-                </span>
-                <span className="audit-ip" title={a.ip_address ?? "—"}>
-                  {a.ip_address ?? "—"}
-                </span>
-              </div>
-            ))
-          )}
+      {loading ? (
+        <div className="empty-state">
+          <div className="es-icon">⏳</div>
+          <p>Loading audit log…</p>
         </div>
-      </div>
+      ) : items.length === 0 ? (
+        <div className="empty-state">
+          <div className="es-icon">📝</div>
+          <p>No audit entries match your filters.</p>
+        </div>
+      ) : (
+        <div className="table-wrap audit-table-wrap">
+          <table className="audit-table">
+            <thead>
+              <tr>
+                <th className="audit-col-type"></th>
+                <th className="audit-col-time">Date &amp; Time</th>
+                <th className="audit-col-actor">Actor Name</th>
+                <th className="audit-col-email">Actor Email</th>
+                <th className="audit-col-action">Action</th>
+                <th className="audit-col-target">Target / Details</th>
+                <th className="audit-col-ip">IP Address</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((a) => (
+                <tr key={a.id} style={{ "--audit-color": TYPE_STYLE[a.action_type].color } as React.CSSProperties}>
+                  <td className="audit-col-type">
+                    <span className="audit-type-badge" title={a.action_type}>
+                      {TYPE_STYLE[a.action_type].icon}
+                    </span>
+                  </td>
+                  <td className="audit-col-time" title={new Date(a.created_at).toLocaleString()}>
+                    {new Date(a.created_at).toLocaleString()}
+                  </td>
+                  <td className="audit-col-actor" title={a.actor_name ?? "—"}>
+                    {a.actor_name ?? "—"}
+                  </td>
+                  <td className="audit-col-email" title={a.actor_email ?? "—"}>
+                    {a.actor_email ?? "—"}
+                  </td>
+                  <td className="audit-col-action" title={a.action}>
+                    {a.action}
+                  </td>
+                  <td className="audit-col-target" title={a.target ?? "—"}>
+                    {a.target ?? "—"}
+                  </td>
+                  <td className="audit-col-ip" title={a.ip_address ?? "—"}>
+                    {a.ip_address ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div style={{ display: "flex", justifyContent: "center", marginTop: "0.5rem" }}>
         <Pagination page={page} totalPages={totalPages} onChange={setPage} />
