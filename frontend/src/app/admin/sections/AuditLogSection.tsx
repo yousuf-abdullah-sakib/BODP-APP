@@ -104,12 +104,18 @@ export default function AuditLogSection() {
                 <span className="audit-type-badge" title={a.action_type}>
                   {TYPE_STYLE[a.action_type].icon}
                 </span>
-                <span className="audit-time">{new Date(a.created_at).toLocaleString()}</span>
-                <span className="audit-actor">{a.actor_name ?? "—"}</span>
-                <span className="audit-action">
+                <span className="audit-time" title={new Date(a.created_at).toLocaleString()}>
+                  {new Date(a.created_at).toLocaleString()}
+                </span>
+                <span className="audit-actor" title={a.actor_name ?? "—"}>
+                  {a.actor_name ?? "—"}
+                </span>
+                <span className="audit-action" title={`${a.action} — ${a.target}`}>
                   {a.action} — <span className="text-muted">{a.target}</span>
                 </span>
-                <span className="audit-ip">{a.ip_address ?? "—"}</span>
+                <span className="audit-ip" title={a.ip_address ?? "—"}>
+                  {a.ip_address ?? "—"}
+                </span>
               </div>
             ))
           )}
