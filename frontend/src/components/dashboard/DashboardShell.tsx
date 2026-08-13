@@ -183,27 +183,25 @@ export default function DashboardShell({
               </button>
               {avatarMenuOpen && (
                 <div className="dash-avatar-dropdown">
+                  <button
+                    onClick={() => {
+                      onNavigate("profile");
+                      setAvatarMenuOpen(false);
+                    }}
+                  >
+                    👤 Profile
+                  </button>
                   {!isAdmin && (
-                    <>
-                      <button
-                        onClick={() => {
-                          onNavigate("profile");
-                          setAvatarMenuOpen(false);
-                        }}
-                      >
-                        👤 Profile
-                      </button>
-                      <button
-                        onClick={() => {
-                          onNavigate("preferences");
-                          setAvatarMenuOpen(false);
-                        }}
-                      >
-                        ⚙️ Preferences
-                      </button>
-                      <div className="dash-avatar-dropdown-sep" />
-                    </>
+                    <button
+                      onClick={() => {
+                        onNavigate("preferences");
+                        setAvatarMenuOpen(false);
+                      }}
+                    >
+                      ⚙️ Preferences
+                    </button>
                   )}
+                  <div className="dash-avatar-dropdown-sep" />
                   <button onClick={handleSignOut} className="danger">
                     ⏻ Sign Out
                   </button>

@@ -7,6 +7,7 @@ import { getUnreadCount } from "@/lib/api/me";
 import AdminDatasetsSection from "./sections/AdminDatasetsSection";
 import AdminManagementSection from "./sections/AdminManagementSection";
 import AdminNotificationsSection from "./sections/AdminNotificationsSection";
+import AdminProfileSection from "./sections/AdminProfileSection";
 import AdminRequestsSection from "./sections/AdminRequestsSection";
 import AnalyticsSection from "./sections/AnalyticsSection";
 import AuditLogSection from "./sections/AuditLogSection";
@@ -52,6 +53,7 @@ export default function AdminClient() {
       items: [
         { key: "overview", label: "Overview", icon: "📊" },
         { key: "notifications", label: "Notifications", icon: "🔔", badge: unreadCount },
+        { key: "profile", label: "Profile", icon: "👤" },
       ],
     },
     {
@@ -120,6 +122,7 @@ export default function AdminClient() {
       {active === "notifications" && (
         <AdminNotificationsSection onMutate={() => setUnreadCountVersion((v) => v + 1)} />
       )}
+      {active === "profile" && <AdminProfileSection />}
       {active === "requests" && (
         <AdminRequestsSection onMutate={() => setPendingCountVersion((v) => v + 1)} />
       )}

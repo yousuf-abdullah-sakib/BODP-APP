@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSession } from "@/context/SessionContext";
 import { useToast } from "@/context/ToastContext";
-import AvatarUpload from "@/components/ui/AvatarUpload";
 import {
   getGeneralSettings,
   updateGeneralSettings,
@@ -11,54 +9,37 @@ import {
   updateNotificationSettings,
 } from "@/lib/api/admin-settings";
 import { getAdminTeam } from "@/lib/api/admin-team";
-import { updateProfile, changePassword } from "@/lib/api/me";
+import { getSessions } from "@/lib/api/me";
 import type {
   GeneralSettingsSchema,
   NotificationSettingsSchema,
 } from "@/lib/types/admin-general-settings";
 import type { AdminTeamMemberPublic } from "@/lib/types/admin-team";
-
-function initialsOf(name: string): string {
-  return name
-    .split(" ")
-    .map((w) => w[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-}
+import type { SessionSummary } from "@/lib/types/me";
 
 export default function SettingsSection() {
   const { toast } = useToast();
-  const { user, refreshUser } = useSession();
 
   const [general, setGeneral] = useState<GeneralSettingsSchema | null>(null);
   const [notifications, setNotifications] = useState<NotificationSettingsSchema | null>(null);
   const [team, setTeam] = useState<AdminTeamMemberPublic[]>([]);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [savingNotifications, setSavingNotifications] = useState(false);
-  const [savingProfile, setSavingProfile] = useState(false);
-
-  const [profileName, setProfileName] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
 
   useEffect(() => {
-    Promise.all([getGeneralSettings(), getNotificationSettings(), getAdminTeam()])
-      .then(([g, n, t]) => {
+    Promise.all([getGeneralSettings(), getNotificationSettings(), getAdminTeam(), getSessions()])
+      .then(([g, n, t, s]) => {
         setGeneral(g);
         setNotifications(n);
         setTeam(t);
+        setSessions(s);
       })
       .catch(() => toast("Failed to load settings.", "error"))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (user) setProfileName(user.full_name);
-  }, [user]);
 
   function updateGeneralField<K extends keyof GeneralSettingsSchema>(
     key: K,
@@ -102,38 +83,13 @@ export default function SettingsSection() {
     }
   }
 
-  async function saveProfile() {
-    setSavingProfile(true);
-    try {
-      if (profileName.trim() && profileName !== user?.full_name) {
-        await updateProfile({ full_name: profileName.trim() });
-      }
-      if (newPassword) {
-        if (!currentPassword) {
-          toast("Enter your current password to set a new one.", "error");
-          setSavingProfile(false);
-          return;
-        }
-        await changePassword(currentPassword, newPassword);
-      }
-      await refreshUser();
-      toast("Admin profile updated.", "success");
-      setCurrentPassword("");
-      setNewPassword("");
-    } catch {
-      toast("Failed to update profile.", "error");
-    } finally {
-      setSavingProfile(false);
-    }
-  }
-
   if (loading || !general || !notifications) {
     return (
       <>
         <div className="dash-header">
           <div>
             <div className="dash-title">Settings</div>
-            <div className="dash-sub">Site configuration and admin profile.</div>
+            <div className="dash-sub">Site configuration and administration.</div>
           </div>
         </div>
         <div className="panel">
@@ -143,12 +99,16 @@ export default function SettingsSection() {
     );
   }
 
+  const activeAdmins = team.filter((m) => m.status === "active").length;
+  const currentSession = sessions.find((s) => s.is_current) ?? null;
+  const otherSessionCount = sessions.filter((s) => !s.is_current).length;
+
   return (
     <>
       <div className="dash-header">
         <div>
           <div className="dash-title">Settings</div>
-          <div className="dash-sub">Site configuration and admin profile.</div>
+          <div className="dash-sub">Site configuration and administration.</div>
         </div>
       </div>
 
@@ -271,68 +231,69 @@ export default function SettingsSection() {
         <div style={{ display: "flex", flexDirection: "column", gap: "1.2rem" }}>
           <div className="panel">
             <div className="panel-head">
-              <span className="panel-title">Admin Profile</span>
+              <span className="panel-title">Admin Team</span>
+              <span className="chip">{activeAdmins} active / {team.length} total</span>
             </div>
             <div className="panel-body">
-              <AvatarUpload variant="admin" initials={initialsOf(user?.full_name ?? "Admin")} />
-              <div className="form-group">
-                <label className="form-label">Name</label>
-                <input
-                  className="form-input"
-                  value={profileName}
-                  onChange={(e) => setProfileName(e.target.value)}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Email</label>
-                <input className="form-input" value={user?.email ?? ""} disabled />
-              </div>
-              <div className="form-group">
-                <label className="form-label">Current Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="Required to set a new password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                />
-              </div>
-              <div className="form-group">
-                <label className="form-label">New Password</label>
-                <input
-                  className="form-input"
-                  type="password"
-                  placeholder="Leave blank to keep current password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
-              </div>
-              <button className="btn-primary" onClick={saveProfile} disabled={savingProfile}>
-                {savingProfile ? "Saving…" : "Save Profile"}
-              </button>
+              {team.length === 0 ? (
+                <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                  No administrators found.
+                </div>
+              ) : (
+                team.map((m) => (
+                  <div className="act-item" key={m.id}>
+                    <div className="act-dot">👤</div>
+                    <div>
+                      <div className="act-text">
+                        <b>{m.full_name}</b> — {m.roles.join(", ") || "Administrator"}
+                        {m.status !== "active" && (
+                          <span
+                            className="badge badge-suspended"
+                            style={{ marginLeft: "0.5rem", fontSize: "0.65rem" }}
+                          >
+                            {m.status}
+                          </span>
+                        )}
+                      </div>
+                      <div className="act-time">
+                        {m.email}
+                        {m.last_active_at
+                          ? ` — last active ${new Date(m.last_active_at).toLocaleDateString()}`
+                          : ""}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+              <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "0.8rem" }}>
+                Manage administrators, roles, and invitations from the dedicated Admin Management
+                section.
+              </p>
             </div>
           </div>
 
           <div className="panel">
             <div className="panel-head">
-              <span className="panel-title">Admin Team</span>
-              <span className="chip">{team.length} member(s)</span>
+              <span className="panel-title">Your Session</span>
             </div>
             <div className="panel-body">
-              {team.slice(0, 4).map((m) => (
-                <div className="act-item" key={m.id}>
-                  <div className="act-dot">👤</div>
-                  <div>
-                    <div className="act-text">
-                      <b>{m.full_name}</b> — {m.roles.join(", ") || "Administrator"}
-                    </div>
-                    <div className="act-time">{m.email}</div>
-                  </div>
+              {currentSession ? (
+                <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)", lineHeight: 1.8 }}>
+                  Signed in from: <b>{currentSession.device ?? "Unknown device"}</b>
+                  {currentSession.ip_address ? ` (${currentSession.ip_address})` : ""}
+                  <br />
+                  Session started: {new Date(currentSession.created_at).toLocaleString()}
+                  <br />
+                  Other active sessions: <b>{otherSessionCount}</b>
                 </div>
-              ))}
+              ) : (
+                <div style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
+                  Session information unavailable.
+                </div>
+              )}
               <p style={{ fontSize: "0.78rem", color: "var(--text-muted)", marginTop: "0.8rem" }}>
-                Manage administrators, roles, and invitations from the dedicated Admin Management
-                section.
+                Manage your password and review or revoke every active session from your Profile
+                page.
               </p>
             </div>
           </div>
