@@ -10,7 +10,9 @@ import type {
 import type { SpatialBounds } from "@/lib/geo/spatialAoi";
 
 export interface DatasetDetailFilters {
-  parameter: string;
+  // Checkbox multi-select — empty array means "all approved parameters"
+  // (no filtering), matching the backend's RecordsFilter.parameters.
+  parameters: string[];
   quality: string;
   dateFrom: string;
   dateTo: string;
@@ -29,7 +31,7 @@ export interface DatasetDetailFilters {
 }
 
 export const DEFAULT_DETAIL_FILTERS: DatasetDetailFilters = {
-  parameter: "",
+  parameters: [],
   quality: "",
   dateFrom: "",
   dateTo: "",
@@ -88,7 +90,7 @@ export function useDatasetFilters(dataset: DatasetDetail) {
 
     const timer = setTimeout(() => {
       getDatasetRecords(dataset.id, {
-        parameter: filters.parameter || undefined,
+        parameters: filters.parameters.length > 0 ? filters.parameters : undefined,
         quality: filters.quality || undefined,
         date_from: filters.dateFrom || undefined,
         date_to: filters.dateTo || undefined,
@@ -132,6 +134,7 @@ export function useDatasetFilters(dataset: DatasetDetail) {
 
   const activeCount = Object.entries(filters).filter(([k, v]) => {
     if (k === "bounds") return v !== null;
+    if (k === "parameters") return Array.isArray(v) && v.length > 0;
     return v !== "";
   }).length;
 

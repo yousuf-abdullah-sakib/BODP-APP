@@ -26,6 +26,18 @@ x-backend-env: &backend-env
   SMTP_PASSWORD: ${SMTP_PASSWORD}
   EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS}
   EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-BODP Platform}
+  # Large-file ingestion timeout tuning (app/core/config.py) — defaults
+  # match the conservative ~50MB/s combined-throughput assumption
+  # documented there. Override INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB in
+  # this deployment's .env once real measured ingest throughput on this
+  # VPS is known; that single value is the one most worth tuning if
+  # large-file ingestion is timing out in practice.
+  INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS: ${INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS:-300}
+  INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB: ${INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB:-180}
+  # Unset by default (unlimited) — only set this if a hard ceiling is
+  # wanted regardless of file size.
+  INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS: ${INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS:-}
+  INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS: ${INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS:-600}
 
 services:
   postgres:

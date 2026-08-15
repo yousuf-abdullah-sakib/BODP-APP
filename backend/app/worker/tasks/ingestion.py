@@ -63,6 +63,8 @@ def _checkpoint(
     db,
     upload: Upload | None,
     *,
+    stage: str | None = None,
+    pct: int | None = None,
     written_processed_bucket: str | None = None,
     written_processed_key: str | None = None,
 ) -> None:
@@ -73,7 +75,14 @@ def _checkpoint(
     mid xr.open_dataset() read) — this cooperative checkpoint, called
     between discrete steps, is the actual mechanism that makes
     cancellation during processing take effect promptly and safely rather
-    than relying solely on the signal."""
+    than relying solely on the signal.
+
+    When stage/pct are given, this is also the single place real
+    Upload.progress_stage/progress_pct values get written — reusing the
+    DB round-trip _checkpoint already does rather than adding a second one
+    just for progress reporting. Every ingestion stage boundary already
+    calls this for cancellation detection, so real progress is a side
+    effect of a mechanism that already existed, not new plumbing."""
     if upload is None:
         return
     db.refresh(upload)
@@ -81,6 +90,10 @@ def _checkpoint(
         raise IngestionCancelled(
             processed_bucket=written_processed_bucket, processed_key=written_processed_key
         )
+    if stage is not None:
+        upload.progress_stage = stage
+        upload.progress_pct = pct
+        db.commit()
 
 
 @celery_app.task(name="ingestion.process_dataset_file", bind=True, max_retries=2)
@@ -177,6 +190,8 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
         if upload:
             upload.status = UploadStatus.COMPLETE.value
             upload.dataset_file_id = dataset_file.id
+            upload.progress_stage = "complete"
+            upload.progress_pct = 100
             db.commit()
 
             # Mirrors the prototype's auto-generated QC entry on successful
@@ -211,6 +226,12 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
 
     storage = get_storage_backend(dataset_file.storage_backend)
 
+    # Initial stage write, before the (potentially multi-GB, multi-minute)
+    # download even starts — without this, the UI would show nothing at
+    # all ("Processing…" with no stage) for however long the download
+    # takes, which for a large file is the single longest silent gap.
+    _checkpoint(db, upload, stage="downloading", pct=0)
+
     with tempfile.TemporaryDirectory(prefix="bodp_ingest_") as tmp_dir:
         tmp_dir_path = Path(tmp_dir)
         raw_local_path = tmp_dir_path / "raw_input"
@@ -224,7 +245,7 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         # the expensive parse/convert step — cancelling during a multi-GB
         # download shouldn't also pay for parsing a file about to be thrown
         # away.
-        _checkpoint(db, upload)
+        _checkpoint(db, upload, stage="parsing", pct=None)
 
         metadata = parser.parse(raw_local_path)
         # Format-agnostic: tabular parsers write Parquet, GeoTIFF writes a
@@ -235,7 +256,7 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         # artifact and writing DatasetRecord rows — the two steps most
         # worth skipping if cancellation arrived while conversion (the
         # slowest step for a large NetCDF/GeoTIFF) was running.
-        _checkpoint(db, upload)
+        _checkpoint(db, upload, stage="uploading_processed", pct=None)
 
         processed_object_key = processed_key(
             dataset_file.dataset_id, dataset_file.id, extension=artifact.file_extension
@@ -258,6 +279,8 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         _checkpoint(
             db,
             upload,
+            stage="writing_records",
+            pct=None,
             written_processed_bucket=processed_bucket,
             written_processed_key=processed_object_key,
         )
@@ -280,7 +303,7 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         records_written = 0
         if metadata.shape == DataShape.TABULAR and not artifact.is_zarr:
             records_written = _write_dataset_records(
-                db, dataset_file=dataset_file, metadata=metadata, artifact=artifact
+                db, dataset_file=dataset_file, metadata=metadata, artifact=artifact, upload=upload
             )
 
         # Runs for every format, including raster and Zarr-backed NetCDF —
@@ -461,7 +484,12 @@ def _is_finite_number(value) -> bool:
 
 
 def _write_dataset_records(
-    db, *, dataset_file: DatasetFile, metadata: ParsedFileMetadata, artifact: ProcessedArtifact
+    db,
+    *,
+    dataset_file: DatasetFile,
+    metadata: ParsedFileMetadata,
+    artifact: ProcessedArtifact,
+    upload: Upload | None = None,
 ) -> int:
     """Populates DatasetRecord from the tidy Parquet artifact a tabular
     parser (CSV/NetCDF/.mat) just wrote — this is what the catalog's
@@ -529,6 +557,11 @@ def _write_dataset_records(
 
     written = 0
     batch: list[DatasetRecord] = []
+    # Known upfront from Parquet's own file metadata (no extra scan needed)
+    # — the denominator for real, moving percentage during this stage,
+    # which is typically the slowest one for a large tabular file.
+    total_source_rows = parquet_file.metadata.num_rows or 1
+    rows_seen = 0
 
     def flush():
         nonlocal batch
@@ -540,6 +573,17 @@ def _write_dataset_records(
     for record_batch in parquet_file.iter_batches(batch_size=_RECORD_BATCH_SIZE):
         table = record_batch.to_pydict()
         row_count = len(table[time_col] if time_col else table[lat_col])
+        rows_seen += row_count
+        # One checkpoint per Parquet batch (every _RECORD_BATCH_SIZE source
+        # rows, not per DatasetRecord row written) — frequent enough for a
+        # genuinely moving percentage on a large file, without adding a DB
+        # round-trip per row.
+        _checkpoint(
+            db,
+            upload,
+            stage="writing_records",
+            pct=min(99, round(100 * rows_seen / total_source_rows)),
+        )
         for i in range(row_count):
             lat = table[lat_col][i] if lat_col else None
             lon = table[lon_col][i] if lon_col else None

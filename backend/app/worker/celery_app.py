@@ -16,6 +16,7 @@ celery_app = Celery(
         "app.worker.tasks.visualize",
         "app.worker.tasks.admin_stats",
         "app.worker.tasks.reports",
+        "app.worker.tasks.bulk_import",
     ],
 )
 
@@ -38,6 +39,13 @@ celery_app.conf.update(
     # consumed by the existing celery-worker service.
     task_routes={
         "ingestion.process_dataset_file": {"queue": "ingestion"},
+        # Bulk import's transfer step does the same kind of large-file I/O
+        # as ingestion itself (streaming a potentially TB-scale file) —
+        # routed to the same dedicated worker/queue so it never blocks (or
+        # gets blocked behind) lightweight tasks either, and never
+        # compounds memory pressure by running concurrently with an
+        # ingestion job on a different worker.
+        "bulk_import.run": {"queue": "ingestion"},
     },
 )
 
@@ -47,15 +55,26 @@ def ingestion_soft_time_limit_seconds(size_bytes: int | None) -> int:
     the actual file's size, rather than one fixed global timeout that
     can't fit both a 1MB CSV and a 500GB NetCDF — see
     Settings.INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS/_PER_GB's docstring in
-    app/core/config.py for the reasoning behind the specific numbers.
+    app/core/config.py for the reasoning behind the specific numbers, and
+    _MAX_SECONDS for the optional (default: unlimited) ceiling.
     A soft (not hard) limit: raises a catchable SoftTimeLimitExceeded
     inside the task rather than forcibly killing the worker process,
     matching this task's existing pattern of handling every failure mode
     as a normal exception (see process_dataset_file's except clauses)."""
     size_gb = (size_bytes or 0) / (1024 * 1024 * 1024)
-    return settings.INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS + round(
+    computed = settings.INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS + round(
         size_gb * settings.INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB
     )
+    max_seconds = settings.INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS
+    return computed if max_seconds is None else min(computed, max_seconds)
+
+
+def ingestion_hard_time_limit_seconds(size_bytes: int | None) -> int:
+    """Worker-level SIGKILL failsafe, always set above the soft limit —
+    see Settings.INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS's docstring for
+    why this exists and why it's not itself the timeout ingestion.py's
+    business logic reacts to."""
+    return ingestion_soft_time_limit_seconds(size_bytes) + settings.INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS
 
 # Master Plan §3 Phase 4 task 9 — daily scheduled check for grants expiring
 # soon, run by the celery-beat service (docker-compose.yml).

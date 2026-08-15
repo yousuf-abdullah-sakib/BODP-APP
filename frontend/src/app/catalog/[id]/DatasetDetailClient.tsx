@@ -241,15 +241,35 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
 
           <FilterSection title="Variable & Quality" icon="📐">
             <div className="filter-group">
-              <span className="filter-label">Parameter / Variable</span>
-              <select className="filter-select" value={filters.parameter} onChange={(e) => update("parameter", e.target.value)}>
-                <option value="">All Parameters</option>
-                {(approvedNonDimensionNames ?? dataset.parameters).map((p) => (
-                  <option key={p} value={p}>
-                    {p}
-                  </option>
-                ))}
-              </select>
+              <span className="filter-label">
+                Parameter / Variable {filters.parameters.length > 0 && <span className="chip">{filters.parameters.length} selected</span>}
+              </span>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                {(approvedNonDimensionNames ?? dataset.parameters).map((p) => {
+                  const checked = filters.parameters.includes(p);
+                  return (
+                    <label key={p} style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.82rem", cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          update(
+                            "parameters",
+                            checked ? filters.parameters.filter((x) => x !== p) : [...filters.parameters, p]
+                          )
+                        }
+                      />
+                      {p}
+                    </label>
+                  );
+                })}
+                {(approvedNonDimensionNames ?? dataset.parameters).length === 0 && (
+                  <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>No parameters available.</span>
+                )}
+              </div>
+              <p style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: "0.3rem" }}>
+                None selected includes all parameters. Select one or more to filter.
+              </p>
             </div>
             <div className="filter-group">
               <span className="filter-label">Quality Level</span>
@@ -466,7 +486,7 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
         <DatasetRequestModal
           dataset={dataset}
           criteria={{
-            parameter: filters.parameter,
+            parameters: filters.parameters,
             dateFrom: filters.dateFrom,
             dateTo: filters.dateTo,
             bounds: filters.bounds,

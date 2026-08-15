@@ -11,7 +11,7 @@ import type { SpatialBounds } from "@/lib/geo/spatialAoi";
 interface DatasetRequestModalProps {
   dataset: DatasetDetail;
   criteria: {
-    parameter: string;
+    parameters: string[];
     dateFrom: string;
     dateTo: string;
     bounds: SpatialBounds | null;
@@ -27,7 +27,7 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const hasCriteria = criteria.parameter || criteria.dateFrom || criteria.dateTo || criteria.bounds;
+  const hasCriteria = criteria.parameters.length > 0 || criteria.dateFrom || criteria.dateTo || criteria.bounds;
 
   async function submit() {
     if (!letter.trim() || letter.trim().length < 50) {
@@ -41,7 +41,7 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
         justification: letter.trim(),
         searchCriteria: hasCriteria
           ? {
-              parameter: criteria.parameter || undefined,
+              parameters: criteria.parameters.length > 0 ? criteria.parameters : undefined,
               date_from: criteria.dateFrom || undefined,
               date_to: criteria.dateTo || undefined,
               bounds: criteria.bounds
@@ -95,7 +95,7 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
         <div className="modal-section">
           <h4>Your Search Criteria</h4>
           <div className="req-letter-box" style={{ fontSize: "0.8rem" }}>
-            {criteria.parameter && <div>Parameter: {criteria.parameter}</div>}
+            {criteria.parameters.length > 0 && <div>Parameters: {criteria.parameters.join(", ")}</div>}
             {(criteria.dateFrom || criteria.dateTo) && (
               <div>
                 Date Range: {criteria.dateFrom || "—"} to {criteria.dateTo || "—"}

@@ -350,15 +350,34 @@ class TestCatalogRecords:
         breakdown = r.json()["quality_breakdown"]
         assert breakdown == {"normal": 7, "caution": 2, "alert": 1}
 
-    async def test_records_filter_by_parameter(self, client):
+    async def test_records_filter_by_single_parameter(self, client):
         seed = await _seed_minimal_catalog()
         r = await client.get(
-            f"/api/v1/catalog/{seed['published_id']}/records", params={"parameter": "Salinity"}
+            f"/api/v1/catalog/{seed['published_id']}/records", params={"parameters": ["Salinity"]}
         )
         body = r.json()
         # 5 of the 10 seeded records alternate to Salinity (odd indices).
         assert body["matching_count"] == 5
         assert all(row["parameter"] == "Salinity" for row in body["preview"])
+
+    async def test_records_filter_by_multiple_parameters_returns_union(self, client):
+        seed = await _seed_minimal_catalog()
+        r = await client.get(
+            f"/api/v1/catalog/{seed['published_id']}/records",
+            params={"parameters": ["Salinity", "Sea Surface Temp"]},
+        )
+        body = r.json()
+        # Both seeded parameter values selected — union covers all 10 rows,
+        # same as no parameter filter at all (checkbox multi-select: zero
+        # selected == all included, and selecting every option explicitly
+        # must behave identically).
+        assert body["matching_count"] == 10
+
+    async def test_records_no_parameter_selected_returns_all(self, client):
+        seed = await _seed_minimal_catalog()
+        r = await client.get(f"/api/v1/catalog/{seed['published_id']}/records")
+        body = r.json()
+        assert body["matching_count"] == 10
 
     async def test_records_filter_by_quality(self, client):
         seed = await _seed_minimal_catalog()

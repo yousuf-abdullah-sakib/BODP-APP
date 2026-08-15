@@ -15,6 +15,7 @@ import {
   unpublishDataset,
 } from "@/lib/api/admin-datasets";
 import AddDataToDatasetModal from "./AddDataToDatasetModal";
+import BulkImportModal from "./BulkImportModal";
 import DatasetModal from "./DatasetModal";
 import type { DatasetAdminDetail, DatasetAdminSummary } from "@/lib/types/admin-datasets";
 
@@ -27,6 +28,7 @@ export default function AdminDatasetsSection() {
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<DatasetAdminDetail | null | "new">(null);
   const [addingDataTo, setAddingDataTo] = useState<DatasetAdminSummary | null>(null);
+  const [bulkImporting, setBulkImporting] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState<string | null>(null);
 
   function refetch() {
@@ -145,9 +147,14 @@ export default function AdminDatasetsSection() {
           <div className="dash-title">Datasets</div>
           <div className="dash-sub">Manage the dataset catalog.</div>
         </div>
-        <button className="btn-primary" onClick={() => setEditing("new")}>
-          + New Dataset
-        </button>
+        <div className="flex-gap">
+          <button className="btn-ghost-sm" onClick={() => setBulkImporting(true)}>
+            📂 Bulk Import
+          </button>
+          <button className="btn-primary" onClick={() => setEditing("new")}>
+            + New Dataset
+          </button>
+        </div>
       </div>
 
       <div className="filter-toolbar">
@@ -257,6 +264,9 @@ export default function AdminDatasetsSection() {
       )}
       {addingDataTo && (
         <AddDataToDatasetModal dataset={addingDataTo} onClose={() => setAddingDataTo(null)} onUploaded={refetch} />
+      )}
+      {bulkImporting && (
+        <BulkImportModal onClose={() => setBulkImporting(false)} onImported={refetch} />
       )}
     </>
   );

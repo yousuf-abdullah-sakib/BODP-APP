@@ -116,7 +116,31 @@ class Settings(BaseSettings):
     # comfortably generous rather than tightly tuned, since the failure
     # mode of "cut off too early" (aborts real work) is worse than "runs
     # a bit long" for a background job with no user waiting synchronously.
+    # Override via INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB in .env once
+    # this deployment's real measured throughput (disk + network + CPU on
+    # the actual VPS, not this conservative assumption) is known — this is
+    # the single knob most worth tuning if large-file ingestion is timing
+    # out in practice on hardware this default doesn't fit.
     INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB: int = 180
+    # Optional upper ceiling on the computed soft limit — None (default)
+    # means unlimited, so a genuinely TB-scale file is never capped below
+    # what BASE + PER_GB×size would otherwise allow. Only meaningful to set
+    # if a deployment wants a hard ceiling regardless of file size (e.g. "no
+    # single ingestion job should ever be allowed to run past 24 hours");
+    # deliberately NOT defaulted to a large fixed number, since that would
+    # just be a differently-arbitrary hardcoded timeout instead of a real
+    # per-size calculation.
+    INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS: int | None = None
+    # Hard worker-level failsafe (SIGKILL), NOT a business-logic timeout —
+    # Celery's soft_time_limit above is what ingestion.py actually catches
+    # and handles gracefully (cleanup + a clear FAILED message). This is a
+    # backstop for the pathological case where a task somehow doesn't
+    # respond to the soft signal at all (e.g. stuck in an uninterruptible
+    # C-extension call with no Python bytecode boundary to catch
+    # SoftTimeLimitExceeded at) — set comfortably above the soft limit so
+    # it should never fire under normal operation; only exists so a
+    # genuinely wedged worker process doesn't block that queue forever.
+    INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS: int = 600
 
     # --- Subset extraction (Master Plan §3 Phase 5) ---
     EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
@@ -143,6 +167,16 @@ class Settings(BaseSettings):
     @classmethod
     def _warn_default_secret(cls, v: str) -> str:
         return v
+
+    @field_validator("INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS", mode="before")
+    @classmethod
+    def _empty_string_means_unset(cls, v: object) -> object:
+        # docker-compose.prod.yml's ${VAR:-} syntax always sets the env key,
+        # to an empty string when the operator hasn't set a real value —
+        # there's no way to conditionally omit an environment: entry from
+        # that YAML syntax. An empty string must mean "unlimited" (the same
+        # as never having set the var at all), not a validation error.
+        return None if v == "" else v
 
     @property
     def is_production(self) -> bool:

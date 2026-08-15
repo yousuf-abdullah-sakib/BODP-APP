@@ -4,6 +4,7 @@ import { ThemeProvider } from "@/context/ThemeContext";
 import { ToastProvider } from "@/context/ToastContext";
 import { SessionProvider } from "@/context/SessionContext";
 import { ConfirmProvider } from "@/context/ConfirmContext";
+import { UploadTrackerProvider } from "@/context/UploadTrackerContext";
 import Navbar from "@/components/layout/Navbar";
 import Footer from "@/components/layout/Footer";
 
@@ -25,9 +26,11 @@ export default function RootLayout({
           <SessionProvider>
             <ToastProvider>
               <ConfirmProvider>
-                <Navbar />
-                <main>{children}</main>
-                <Footer />
+                <UploadTrackerProvider>
+                  <Navbar />
+                  <main>{children}</main>
+                  <Footer />
+                </UploadTrackerProvider>
               </ConfirmProvider>
             </ToastProvider>
           </SessionProvider>

@@ -32,13 +32,29 @@ def validate_scope_within_grant(requested: SearchCriteriaSchema, grant_scope: di
     if grant_scope is None:
         return
 
-    for field in ("category", "parameter", "source"):
+    for field in ("category", "source"):
         grant_value = grant_scope.get(field)
         requested_value = getattr(requested, field)
         if grant_value and requested_value and requested_value != grant_value:
             raise HTTPException(
                 status_code=422,
                 detail=f"Requested {field} '{requested_value}' is outside the grant's approved {field} '{grant_value}'.",
+            )
+
+    # parameters is a list (checkbox multi-select) — the requested set must
+    # be a SUBSET of the grant's approved parameters, not an exact match.
+    # An empty/absent grant_parameters means the grant itself was approved
+    # with no parameter restriction (all parameters allowed), matching how
+    # RecordsFilter/scope_filter.py both treat an empty list as "no
+    # filtering" rather than "filter to nothing."
+    grant_parameters = grant_scope.get("parameters")
+    if grant_parameters and requested.parameters:
+        disallowed = set(requested.parameters) - set(grant_parameters)
+        if disallowed:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Requested parameter(s) {sorted(disallowed)} are outside the grant's "
+                f"approved parameters {sorted(grant_parameters)}.",
             )
 
     grant_date_from = grant_scope.get("date_from")
@@ -185,6 +201,44 @@ async def list_requests_for_admin(
     return list(result.scalars().all())
 
 
+async def modify_request(
+    db: AsyncSession,
+    *,
+    request: DatasetRequest,
+    admin: User,
+    search_criteria: SearchCriteriaSchema,
+    ip_address: str | None,
+) -> DatasetRequest:
+    """Save Changes — persists an admin's edited filter configuration into
+    admin_modified_search_criteria WITHOUT approving or rejecting. Only
+    valid while the request is still pending (matching approve/reject's
+    own terminal-state guard) — modifying a decided request would be
+    meaningless since its AccessGrant.scope is already fixed. The
+    original request.search_criteria is never read from or written to
+    here, by design."""
+    if request.status != RequestStatus.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Request is already {request.status}, cannot modify its filter configuration",
+        )
+
+    request.admin_modified_search_criteria = search_criteria.model_dump(exclude_none=True)
+    request.updated_at = datetime.now(UTC)
+
+    await write_audit_log(
+        db,
+        actor=admin,
+        action="Modified request filter configuration",
+        action_type=AuditActionType.DATASET,
+        target=str(request.id),
+        ip_address=ip_address,
+    )
+
+    await db.commit()
+    await db.refresh(request)
+    return await _get_request_with_relations(db, request.id)
+
+
 async def approve_request(
     db: AsyncSession,
     *,
@@ -204,11 +258,19 @@ async def approve_request(
     now = datetime.now(UTC)
     expires_at = compute_expiry(now, duration, custom_expires_at)
 
-    scope = (
-        search_criteria_override.model_dump(exclude_none=True)
-        if search_criteria_override
-        else request.search_criteria
-    )
+    # Precedence for the grant's final scope: an override passed directly
+    # to this approve call (e.g. approving straight from the Modify modal
+    # without a separate Save Changes step first) wins; otherwise a
+    # previously-saved admin modification (Save Changes) wins; otherwise
+    # the user's original, untouched search_criteria. request.
+    # search_criteria itself is NEVER written to below — it stays exactly
+    # what the user originally submitted, permanently.
+    if search_criteria_override is not None:
+        scope = search_criteria_override.model_dump(exclude_none=True)
+    elif request.admin_modified_search_criteria is not None:
+        scope = request.admin_modified_search_criteria
+    else:
+        scope = request.search_criteria
 
     grant = AccessGrant(
         user_id=request.user_id,
@@ -228,8 +290,12 @@ async def approve_request(
     request.updated_at = now
     if note:
         request.admin_note = note
+    # An override supplied directly at approval time (not previously
+    # saved via Save Changes) is recorded into admin_modified_search_
+    # criteria too, so the review trail is complete either way — but
+    # search_criteria (the original) is never touched here.
     if search_criteria_override is not None:
-        request.search_criteria = scope
+        request.admin_modified_search_criteria = scope
 
     requester = await db.get(User, request.user_id)
     if requester is not None:

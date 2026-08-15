@@ -32,7 +32,7 @@ from app.services.dataset_multipart_upload_service import (
     PART_SIZE_BYTES,
     DatasetMultipartUploadError,
 )
-from app.worker.celery_app import ingestion_soft_time_limit_seconds
+from app.worker.celery_app import ingestion_hard_time_limit_seconds, ingestion_soft_time_limit_seconds
 from app.worker.tasks.ingestion import process_dataset_file
 
 router = APIRouter(prefix="/admin/datasets", tags=["admin-datasets"])
@@ -261,6 +261,7 @@ async def upload_dataset_file_endpoint(
     task = process_dataset_file.apply_async(
         args=[str(dataset_file.id), str(upload.id)],
         soft_time_limit=ingestion_soft_time_limit_seconds(dataset_file.file_size_bytes),
+        time_limit=ingestion_hard_time_limit_seconds(dataset_file.file_size_bytes),
     )
     upload.celery_task_id = task.id
     await db.commit()
@@ -377,6 +378,7 @@ async def complete_multipart_upload_endpoint(
     task = process_dataset_file.apply_async(
         args=[str(dataset_file.id), str(upload.id)],
         soft_time_limit=ingestion_soft_time_limit_seconds(dataset_file.file_size_bytes),
+        time_limit=ingestion_hard_time_limit_seconds(dataset_file.file_size_bytes),
     )
     upload.celery_task_id = task.id
     await db.commit()

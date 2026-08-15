@@ -16,6 +16,47 @@ const TABS: { key: "all" | RequestDetail["status"]; label: string }[] = [
   { key: "rejected", label: "Rejected" },
 ];
 
+/** Always-visible on the request card (not gated behind opening Modify) —
+ * shows the researcher's original filter configuration, plus the admin's
+ * saved modification if one exists, so an admin can see the full scope of
+ * a request without an extra click. */
+function RequestFilterConfig({ request }: { request: RequestDetail }) {
+  const original = request.search_criteria;
+  const modified = request.admin_modified_search_criteria;
+  if (!original && !modified) return null;
+
+  function summarize(c: SearchCriteria): string[] {
+    const parts: string[] = [];
+    if (c.parameters && c.parameters.length > 0) parts.push(`Parameters: ${c.parameters.join(", ")}`);
+    if (c.category) parts.push(`Category: ${c.category}`);
+    if (c.source) parts.push(`Source: ${c.source}`);
+    if (c.date_from || c.date_to) parts.push(`Date: ${c.date_from || "—"} to ${c.date_to || "—"}`);
+    if (c.bounds) {
+      parts.push(
+        `Spatial: Lat ${c.bounds.lat_min.toFixed(2)}°–${c.bounds.lat_max.toFixed(2)}°, Lon ${c.bounds.lon_min.toFixed(2)}°–${c.bounds.lon_max.toFixed(2)}°`
+      );
+    }
+    return parts;
+  }
+
+  return (
+    <div style={{ marginBottom: "1rem" }}>
+      <div className="mini-label">Filter Configuration</div>
+      {original && (
+        <div className="req-letter-box" style={{ fontSize: "0.78rem", marginBottom: modified ? "0.5rem" : 0 }}>
+          <b style={{ color: "var(--text-muted)" }}>Original request:</b>{" "}
+          {summarize(original).length > 0 ? summarize(original).join(" · ") : "No filters set"}
+        </div>
+      )}
+      {modified && (
+        <div className="req-letter-box" style={{ fontSize: "0.78rem", borderLeftColor: "var(--accent)" }}>
+          <b style={{ color: "var(--accent)" }}>Admin modified:</b> {summarize(modified).join(" · ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function initialsOf(name: string) {
   return name
     .replace(/^Dr\.\s*/, "")
@@ -159,6 +200,8 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
                 <div className="mini-label">Research Justification</div>
                 <div className="req-letter-box" style={{ marginBottom: "1rem" }}>{r.justification}</div>
 
+                <RequestFilterConfig request={r} />
+
                 {r.admin_note && (
                   <div className="req-letter-box note-danger" style={{ marginTop: "0.9rem" }}>
                     <b style={{ color: "var(--red)" }}>Admin note:</b> {r.admin_note}
@@ -191,7 +234,12 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
       )}
 
       {modifyTarget && (
-        <ModifyApproveModal request={modifyTarget} onClose={() => setModifyTarget(null)} onConfirm={handleModifyConfirm} />
+        <ModifyApproveModal
+          request={modifyTarget}
+          onClose={() => setModifyTarget(null)}
+          onConfirm={handleModifyConfirm}
+          onSaved={refetch}
+        />
       )}
       {rejectTarget && <RejectRequestModal onClose={() => setRejectTarget(null)} onConfirm={handleRejectConfirm} />}
       {durationTarget && (

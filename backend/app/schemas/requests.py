@@ -25,10 +25,15 @@ class SpatialBoundsSchema(BaseModel):
 class SearchCriteriaSchema(BaseModel):
     """Mirrors the frontend's RequestSearchCriteria — the user's active
     catalog-detail filter state, captured at request time and editable by an
-    admin before approval (Master Plan §3 Phase 4 tasks 1 and 4)."""
+    admin before approval (Master Plan §3 Phase 4 tasks 1 and 4).
+
+    parameters is a list, not a single value — zero selected means "all
+    approved parameters" (no filtering), matching the checkbox multi-select
+    UI on the dataset detail page. Also used, unchanged in shape, for
+    AccessGrant.scope and SubsetExtraction.requested_scope."""
 
     category: str | None = None
-    parameter: str | None = None
+    parameters: list[str] | None = None
     source: str | None = None
     date_from: str | None = None
     date_to: str | None = None
@@ -97,9 +102,26 @@ class RequestSummary(BaseModel):
 
 
 class RequestDetail(RequestSummary):
-    """Adds requester identity — used on the admin review queue."""
+    """Adds requester identity plus the admin's in-progress modified
+    filter configuration (if any) — used on the admin review queue. The
+    end user's own /me/requests view (RequestSummary) never exposes
+    admin_modified_search_criteria; it's an internal review artifact
+    until a decision (approve/reject) is made, at which point the
+    resulting AccessGrant.scope is what the user actually sees."""
 
     user: RequestUserSummary
+    admin_modified_search_criteria: SearchCriteriaSchema | None = None
+
+
+class ModifyRequestBody(BaseModel):
+    """Save Changes — persists an admin's edited filter configuration into
+    DatasetRequest.admin_modified_search_criteria WITHOUT approving or
+    rejecting. Distinct from ApproveRequestBody's search_criteria (which
+    approves immediately, sourced from either the original or a modified
+    scope) — this lets an admin review/edit now and decide later, and
+    other admins can see the saved modification in the meantime."""
+
+    search_criteria: SearchCriteriaSchema
 
 
 class ApproveRequestBody(BaseModel):

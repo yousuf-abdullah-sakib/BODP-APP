@@ -11,6 +11,7 @@ from app.schemas.requests import (
     ApproveRequestBody,
     ExtendGrantBody,
     GrantDetail,
+    ModifyRequestBody,
     RejectRequestBody,
     RequestDetail,
 )
@@ -29,6 +30,29 @@ async def list_requests(
     db: AsyncSession = Depends(get_db),
 ):
     return await requests_service.list_requests_for_admin(db, status_filter=status)
+
+
+@router.patch("/requests/{request_id}/modify", response_model=RequestDetail)
+async def modify_request(
+    request_id: uuid.UUID,
+    body: ModifyRequestBody,
+    request: Request,
+    current_user: User = Depends(require_permission(_APPROVE_PERMISSION)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Save Changes — persists an admin's edited filter configuration
+    without approving or rejecting. Reuses the same "Approve Requests"
+    permission as approve/reject, since reviewing/modifying a request's
+    scope is part of the same review capability, not a separate one."""
+    dataset_request = await requests_service.get_request_for_admin(db, request_id)
+    modified = await requests_service.modify_request(
+        db,
+        request=dataset_request,
+        admin=current_user,
+        search_criteria=body.search_criteria,
+        ip_address=get_client_ip(request),
+    )
+    return modified
 
 
 @router.post("/requests/{request_id}/approve", response_model=GrantDetail)

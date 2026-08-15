@@ -28,6 +28,15 @@ x-backend-env: &backend-env
   SMTP_PASSWORD: ${SMTP_PASSWORD:-}
   EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-no-reply@bodp.example.org}
   EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-BODP Platform}
+  # Large-file ingestion timeout tuning (Settings in app/core/config.py) —
+  # not listed here individually since Pydantic settings already reads
+  # any of these directly from a .env file/the environment with no
+  # docker-compose.yml edit needed: INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS,
+  # INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB (the one most worth tuning
+  # against this deployment's real measured ingest throughput),
+  # INGESTION_SOFT_TIME_LIMIT_MAX_SECONDS (optional hard ceiling, unset =
+  # unlimited), INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS (worker SIGKILL
+  # failsafe margin above the soft limit).
 
 services:
   postgres:

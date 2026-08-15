@@ -23,7 +23,14 @@ export interface CatalogSearchParams {
 function buildQuery(params: Record<string, unknown>): string {
   const usp = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== "") usp.set(key, String(value));
+    if (value === undefined || value === "") continue;
+    if (Array.isArray(value)) {
+      // Repeated query params (?parameters=A&parameters=B) — FastAPI's
+      // list[str] = Query(...) parses this natively.
+      for (const item of value) usp.append(key, String(item));
+    } else {
+      usp.set(key, String(value));
+    }
   }
   const qs = usp.toString();
   return qs ? `?${qs}` : "";
@@ -52,8 +59,8 @@ export async function getDatasetSchema(id: string): Promise<DatasetSchemaFilters
 }
 
 export interface DatasetRecordsParams {
-  [key: string]: string | number | undefined;
-  parameter?: string;
+  [key: string]: string | number | string[] | undefined;
+  parameters?: string[];
   quality?: string;
   date_from?: string;
   date_to?: string;

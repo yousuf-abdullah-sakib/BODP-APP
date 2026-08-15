@@ -276,7 +276,7 @@ class RecordsFilter:
     def __init__(
         self,
         *,
-        parameter: str | None = None,
+        parameters: list[str] | None = None,
         quality: str | None = None,
         date_from: date_type | None = None,
         date_to: date_type | None = None,
@@ -292,7 +292,7 @@ class RecordsFilter:
         format_: str | None = None,
         processing_level: str | None = None,
     ):
-        self.parameter = parameter
+        self.parameters = parameters
         self.quality = quality
         self.date_from = date_from
         self.date_to = date_to
@@ -312,11 +312,16 @@ class RecordsFilter:
 def _apply_record_filters(query, dataset_id: uuid.UUID, f: RecordsFilter):
     """Shared WHERE-clause builder for the filtered-records queries — matches
     the prototype's useDatasetFilters filter predicate exactly (Master Plan
-    §3 Phase 3 task 3), including bbox-as-ST_Intersects for the spatial case."""
+    §3 Phase 3 task 3), including bbox-as-ST_Intersects for the spatial case.
+
+    parameters is a list (checkbox multi-select on the dataset detail
+    page) — zero/None selected means no filtering by parameter at all (all
+    approved parameters included), matching a plain unchecked state;
+    non-empty applies an IN filter covering one or many selected values."""
     query = query.where(DatasetRecord.dataset_id == dataset_id)
 
-    if f.parameter:
-        query = query.where(DatasetRecord.parameter == f.parameter)
+    if f.parameters:
+        query = query.where(DatasetRecord.parameter.in_(f.parameters))
     if f.quality:
         query = query.where(DatasetRecord.quality_flag == f.quality)
     if f.date_from:

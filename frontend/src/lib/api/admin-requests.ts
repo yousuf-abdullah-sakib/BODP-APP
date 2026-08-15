@@ -28,6 +28,18 @@ export async function approveRequest(
   });
 }
 
+/** Save Changes — persists an edited filter configuration into
+ * admin_modified_search_criteria WITHOUT approving or rejecting. */
+export async function modifyRequest(
+  requestId: string,
+  searchCriteria: SearchCriteria
+): Promise<RequestDetail> {
+  return apiFetch<RequestDetail>(`/admin/requests/${requestId}/modify`, {
+    method: "PATCH",
+    body: { search_criteria: searchCriteria },
+  });
+}
+
 export async function rejectRequest(requestId: string, reason: string): Promise<RequestDetail> {
   return apiFetch<RequestDetail>(`/admin/requests/${requestId}/reject`, {
     method: "POST",

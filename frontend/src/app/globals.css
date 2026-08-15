@@ -499,6 +499,19 @@ footer > * { max-width: 1200px; margin-left: auto; margin-right: auto; }
 .toast-info{border-color:rgba(15,118,110,0.4);border-left:3px solid var(--accent)}
 @keyframes slideIn{from{transform:translateX(110%);opacity:0}to{transform:translateX(0);opacity:1}}
 
+/* ── Upload tracker (persistent minimize/background-tracking indicator) ── */
+.upload-tracker-stack{position:fixed;bottom:1.5rem;left:1.5rem;z-index:998;display:flex;flex-direction:column;gap:0.5rem;max-width:calc(100vw - 2rem)}
+.upload-tracker-pill{background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;padding:0.6rem 0.9rem;font-size:0.8rem;min-width:240px;max-width:340px;display:flex;align-items:center;gap:0.6rem;box-shadow:0 8px 24px rgba(0,0,0,0.25);cursor:pointer;text-align:left;animation:slideIn 0.3s ease}
+.upload-tracker-pill:hover{border-left-color:var(--accent-light,var(--accent))}
+.upload-tracker-complete{border-left-color:var(--green)}
+.upload-tracker-failed{border-left-color:var(--red)}
+.upload-tracker-cancelled{border-left-color:var(--text-muted)}
+.upload-tracker-icon{font-size:1rem;flex-shrink:0}
+.upload-tracker-text{display:flex;flex-direction:column;gap:0.1rem;min-width:0;flex:1}
+.upload-tracker-filename{font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upload-tracker-status{color:var(--text-muted);font-size:0.72rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upload-tracker-pct{font-weight:700;color:var(--accent);flex-shrink:0}
+
 /* ── Modal ── */
 .modal-overlay{display:flex;position:fixed;inset:0;background:rgba(2,10,20,0.6);z-index:500;align-items:center;justify-content:center;padding:1rem}
 .modal{background:var(--bg-secondary);border:1px solid var(--border);border-radius:16px;width:100%;max-width:580px;max-height:90vh;overflow-y:auto}

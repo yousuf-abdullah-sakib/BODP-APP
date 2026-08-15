@@ -6,6 +6,11 @@ import pytest
 import rasterio
 import scipy.io
 from rasterio.transform import from_origin
+from sqlalchemy import select
+
+from app.core.database import AsyncSessionLocal
+from app.models.catalog import Dataset, DatasetFile, DatasetStatus
+from app.models.uploads import Upload
 
 pytestmark = pytest.mark.asyncio
 
@@ -583,6 +588,66 @@ class TestUploadValidation:
                 headers=admin_headers,
             )
             assert r.status_code == 200, r.text
+
+
+class TestSmallFileAbortCleanup:
+    """Small-file cancellation (Admin Panel production-readiness follow-up)
+    is implemented client-side as a real AbortController on the browser's
+    fetch — this proves the server-side invariant that makes that safe:
+    upload_dataset_file only creates Upload/DatasetFile rows AFTER the
+    full request body has been received, so a client that disconnects
+    mid-transfer (which is exactly what aborting a fetch() does) never
+    leaves an orphaned row behind, matching multipart cancellation's
+    equivalent no-residue guarantee for the small-file path."""
+
+    async def test_client_disconnect_mid_upload_creates_no_rows(self, admin_headers):
+        from app.services.dataset_file_service import upload_dataset_file
+
+        async with AsyncSessionLocal() as db:
+            dataset = Dataset(
+                code="BD-ABORT-TEST",
+                title="Abort Cleanup Test Dataset",
+                status=DatasetStatus.DRAFT.value,
+                record_count=0,
+            )
+            db.add(dataset)
+            await db.commit()
+            dataset_id = dataset.id
+
+        class _DisconnectingUploadFile:
+            """Simulates exactly what an aborted browser fetch() looks like
+            from the server's side: the request body stream raises partway
+            through, instead of ever completing — the same failure mode
+            Starlette surfaces for a real client TCP disconnect."""
+
+            def __init__(self, data: bytes):
+                self._data = data
+                self._sent_first_chunk = False
+
+            async def read(self, size: int) -> bytes:
+                if not self._sent_first_chunk:
+                    self._sent_first_chunk = True
+                    return self._data[: min(size, len(self._data) // 2)]
+                raise ConnectionResetError("simulated client disconnect mid-upload")
+
+        async with AsyncSessionLocal() as db:
+            with pytest.raises(ConnectionResetError):
+                await upload_dataset_file(
+                    db,
+                    dataset_id=dataset_id,
+                    filename="aborted.csv",
+                    file_stream=_DisconnectingUploadFile(_make_csv_bytes()),
+                    uploaded_by=None,
+                )
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetFile).where(DatasetFile.dataset_id == dataset_id)
+            )
+            assert result.scalars().all() == []
+
+            result = await db.execute(select(Upload).where(Upload.dataset_id == dataset_id))
+            assert result.scalars().all() == []
 
 
 class TestUploadListing:

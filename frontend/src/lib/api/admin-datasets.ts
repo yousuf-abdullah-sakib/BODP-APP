@@ -56,12 +56,17 @@ export async function permanentlyDeleteDataset(id: string): Promise<void> {
   await apiFetch(`/admin/datasets/${id}`, { method: "DELETE", body: { confirm: true } });
 }
 
-export async function uploadDatasetFile(datasetId: string, file: File): Promise<DatasetFileUploadResponse> {
+export async function uploadDatasetFile(
+  datasetId: string,
+  file: File,
+  options?: { signal?: AbortSignal }
+): Promise<DatasetFileUploadResponse> {
   const form = new FormData();
   form.set("file", file);
   return apiFetch<DatasetFileUploadResponse>(`/admin/datasets/${datasetId}/files`, {
     method: "POST",
     body: form,
+    signal: options?.signal,
   });
 }
 

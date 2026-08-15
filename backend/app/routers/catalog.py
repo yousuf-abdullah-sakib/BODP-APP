@@ -177,7 +177,7 @@ async def catalog_dataset_stations(dataset_id: uuid.UUID, db: AsyncSession = Dep
 @router.get("/{dataset_id}/records", response_model=DatasetRecordsResponse)
 async def catalog_dataset_records(
     dataset_id: uuid.UUID,
-    parameter: str | None = Query(default=None),
+    parameters: list[str] | None = Query(default=None),
     quality: str | None = Query(default=None),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
@@ -195,7 +195,8 @@ async def catalog_dataset_records(
     db: AsyncSession = Depends(get_db),
 ):
     """Filtered preview query: bbox via PostGIS ST_Intersects, date range,
-    depth range, parameter, quality flag, processing level, station — capped
+    depth range, parameters (multi-select — zero selected means no
+    parameter filtering), quality flag, processing level, station — capped
     preview (6 rows) + full matching-count + per-quality-flag breakdown
     (Master Plan §3 Phase 3 task 3)."""
     dataset = await get_published_dataset(db, dataset_id)
@@ -203,7 +204,7 @@ async def catalog_dataset_records(
         raise HTTPException(status_code=404, detail="Dataset not found")
 
     record_filter = RecordsFilter(
-        parameter=parameter,
+        parameters=parameters,
         quality=quality,
         date_from=date_from,
         date_to=date_to,

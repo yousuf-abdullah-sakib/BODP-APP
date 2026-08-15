@@ -17,6 +17,7 @@ from app.routers import (
     admin_audit,
     admin_blog,
     admin_boundary,
+    admin_bulk_import,
     admin_categories,
     admin_cms,
     admin_contact,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_datasets.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_bulk_import.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_dataset_schema.router, prefix=settings.API_V1_PREFIX)
     app.include_router(catalog.router, prefix=settings.API_V1_PREFIX)
     app.include_router(requests.router, prefix=settings.API_V1_PREFIX)

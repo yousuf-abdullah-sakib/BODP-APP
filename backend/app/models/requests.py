@@ -45,8 +45,21 @@ class DatasetRequest(UUIDPKMixin, Base):
     )
     justification: Mapped[str] = mapped_column(Text, nullable=False)
     # Captures the user's active catalog-detail filter state at request time:
-    # category/parameter/source/dateFrom/dateTo/spatial bounds (see Master Plan §1).
+    # category/parameters/source/dateFrom/dateTo/spatial bounds (see Master
+    # Plan §1). Immutable after creation — an admin's edits during review
+    # go into admin_modified_search_criteria below, never here, so the
+    # original request a user submitted can always be reconstructed
+    # exactly, independent of anything an admin later changed.
     search_criteria: Mapped[dict | None] = mapped_column(JSONB)
+    # Admin's edited filter configuration, saved via the explicit "Save
+    # Changes" action (PATCH /admin/requests/{id}/modify) — separate from
+    # search_criteria (the original) and from AccessGrant.scope (the
+    # final approved configuration, set at approval time from this field
+    # if present, else from search_criteria). Null until an admin actually
+    # modifies and saves; a request can be approved with this still null,
+    # in which case the original search_criteria becomes the grant's scope
+    # unchanged, exactly as before this field existed.
+    admin_modified_search_criteria: Mapped[dict | None] = mapped_column(JSONB)
     supporting_document_file_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("dataset_files.id", ondelete="SET NULL")
     )
