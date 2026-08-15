@@ -5,6 +5,9 @@ import type {
   DatasetCreate,
   DatasetFileUploadResponse,
   DatasetUpdate,
+  MultipartUploadCompleteResponse,
+  MultipartUploadInitiateResponse,
+  MultipartUploadPresignPartResponse,
   UploadStatusResponse,
 } from "@/lib/types/admin-datasets";
 
@@ -64,4 +67,73 @@ export async function uploadDatasetFile(datasetId: string, file: File): Promise<
 
 export async function getUploadStatus(uploadId: string): Promise<UploadStatusResponse> {
   return apiFetch<UploadStatusResponse>(`/admin/datasets/uploads/${uploadId}`);
+}
+
+// --- Direct-to-MinIO multipart upload (large files) ---
+//
+// Only the four control-plane calls below (initiate / presign-part /
+// mark-part-complete / complete) go through apiFetch — the actual file
+// bytes never touch this backend. Each part's PUT goes straight to the
+// presigned MinIO URL via a raw fetch(), deliberately bypassing apiFetch:
+// no bearer token (the presigned URL's signature IS the auth), no
+// Content-Type/JSON handling, and the request body is a raw Blob slice.
+
+export async function initiateMultipartUpload(
+  datasetId: string,
+  filename: string,
+  totalSizeBytes: number
+): Promise<MultipartUploadInitiateResponse> {
+  return apiFetch<MultipartUploadInitiateResponse>(`/admin/datasets/${datasetId}/uploads/initiate`, {
+    method: "POST",
+    body: { filename, total_size_bytes: totalSizeBytes },
+  });
+}
+
+export async function presignUploadPart(
+  uploadId: string,
+  partNumber: number
+): Promise<MultipartUploadPresignPartResponse> {
+  return apiFetch<MultipartUploadPresignPartResponse>(
+    `/admin/datasets/uploads/${uploadId}/parts/${partNumber}/presign`,
+    { method: "POST" }
+  );
+}
+
+/** PUTs one part's bytes directly to MinIO via its presigned URL and
+ * returns the ETag MinIO assigned it — required later to complete the
+ * multipart upload. Does not go through apiFetch/API_BASE_URL: the
+ * presigned URL is already a complete, absolute, pre-authorized address. */
+export async function uploadPartDirect(uploadUrl: string, blob: Blob): Promise<string> {
+  const res = await fetch(uploadUrl, { method: "PUT", body: blob });
+  if (!res.ok) {
+    throw new Error(`Failed to upload part (status ${res.status})`);
+  }
+  const etag = res.headers.get("ETag");
+  if (!etag) {
+    throw new Error("MinIO did not return an ETag for the uploaded part");
+  }
+  return etag.replaceAll('"', "");
+}
+
+export async function markPartUploaded(
+  uploadId: string,
+  partNumber: number,
+  sizeBytes: number
+): Promise<UploadStatusResponse> {
+  return apiFetch<UploadStatusResponse>(`/admin/datasets/uploads/${uploadId}/parts/complete`, {
+    method: "POST",
+    body: { part_number: partNumber, size_bytes: sizeBytes },
+  });
+}
+
+export async function completeMultipartUpload(uploadId: string): Promise<MultipartUploadCompleteResponse> {
+  return apiFetch<MultipartUploadCompleteResponse>(`/admin/datasets/uploads/${uploadId}/complete`, {
+    method: "POST",
+  });
+}
+
+export async function cancelUpload(uploadId: string): Promise<UploadStatusResponse> {
+  return apiFetch<UploadStatusResponse>(`/admin/datasets/uploads/${uploadId}/cancel`, {
+    method: "POST",
+  });
 }

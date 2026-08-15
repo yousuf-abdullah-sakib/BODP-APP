@@ -1,13 +1,21 @@
 import uuid
 from datetime import date as date_type
 
-from sqlalchemy import Float, case, func, select
+from sqlalchemy import Float, case, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.cache import cache_get_json, cache_set_json
-from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, DatasetStatus, QualityFlag, Station
-from app.schemas.catalog import DatasetSort
+from app.models.catalog import (
+    Dataset,
+    DatasetCategory,
+    DatasetRecord,
+    DatasetStatus,
+    DatasetVariable,
+    QualityFlag,
+    Station,
+)
+from app.schemas.catalog import DatasetSchemaFilters, DatasetSort, SchemaFilterVariable
 
 _TAXONOMY_CACHE_KEY = "catalog:taxonomy"
 _TAXONOMY_CACHE_TTL_SECONDS = 300
@@ -222,6 +230,48 @@ async def get_station_options_for_dataset(
     return list(result.scalars().all())
 
 
+async def get_dataset_schema_for_filters(
+    db: AsyncSession, dataset_id: uuid.UUID
+) -> DatasetSchemaFilters | None:
+    """Backs GET /catalog/{id}/schema (PLAN.md Phase 4) — the fallback
+    trigger for schema-driven filter rendering. Returns None for a dataset
+    an admin hasn't reviewed yet (Dataset.schema_reviewed_at IS NULL), so
+    the frontend keeps today's fixed dataset.parameters-driven rendering
+    for anything not yet reviewed, per the explicit no-hard-cutover
+    decision. Only variables an admin actually assigned a role to (Phase
+    3) are returned — an unreviewed leftover with empty roles never
+    surfaces here even on an otherwise-reviewed dataset."""
+    dataset = await db.get(Dataset, dataset_id)
+    if dataset is None or dataset.schema_reviewed_at is None:
+        return None
+
+    result = await db.execute(
+        select(DatasetVariable)
+        .where(
+            DatasetVariable.dataset_id == dataset_id,
+            func.cardinality(DatasetVariable.roles) > 0,
+        )
+        .order_by(DatasetVariable.name)
+    )
+    variables = list(result.scalars().all())
+
+    return DatasetSchemaFilters(
+        reviewed_at=dataset.schema_reviewed_at,
+        variables=[
+            SchemaFilterVariable(
+                name=v.name,
+                data_type=v.data_type,
+                is_dimension=v.is_dimension,
+                roles=v.roles,
+                min_value=float(v.min_value) if v.min_value is not None else None,
+                max_value=float(v.max_value) if v.max_value is not None else None,
+                distinct_values=v.distinct_values,
+            )
+            for v in variables
+        ],
+    )
+
+
 class RecordsFilter:
     def __init__(
         self,
@@ -344,7 +394,12 @@ async def get_filtered_records(
         "alert": breakdown_rows.get(QualityFlag.ALERT.value, 0),
     }
 
-    preview_query = filtered_query.order_by(DatasetRecord.time.desc()).limit(preview_limit)
+    # Phase 2: DatasetRecord.time is now nullable (not every dataset has a
+    # time dimension) — Postgres defaults DESC to NULLS FIRST, which would
+    # put every timeless row ahead of real dates in the preview. Timeless
+    # rows are still real data and still returned, just ordered after
+    # anything with an actual date.
+    preview_query = filtered_query.order_by(nulls_last(DatasetRecord.time.desc())).limit(preview_limit)
     preview_result = await db.execute(preview_query)
     preview_rows = list(preview_result.scalars().all())
 

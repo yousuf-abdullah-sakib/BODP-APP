@@ -89,7 +89,7 @@ class CsvParser(FileParser):
             temporal_start=time_min.date() if time_min is not None else None,
             temporal_end=time_max.date() if time_max is not None else None,
             record_count=row_count,
-            extra={"columns": columns},
+            extra={"columns": columns, "lat_col": lat_col, "lon_col": lon_col, "time_col": time_col},
         )
 
     def to_processed(self, path: Path, output_dir: Path) -> ProcessedArtifact:

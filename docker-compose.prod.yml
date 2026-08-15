@@ -85,10 +85,12 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+    # --timeout 600: coordinated with nginx/conf.d/bodp.conf's proxy_read/
+    # send_timeout (Phase 2) — see backend/Dockerfile's matching comment.
     command: >
       sh -c "alembic upgrade head &&
              gunicorn app.main:app --worker-class uvicorn.workers.UvicornWorker
-             --bind 0.0.0.0:8000 --workers 4 --timeout 120
+             --bind 0.0.0.0:8000 --workers 4 --timeout 600
              --access-logfile - --error-logfile -"
 
   celery-worker:
@@ -103,7 +105,26 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+    # -Q celery: the default queue only — dataset-file ingestion is routed
+    # to the dedicated celery-worker-ingestion service below (see
+    # docker-compose.yml's matching comment / celery_app.py's task_routes).
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4 -Q celery
+
+  celery-worker-ingestion:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # concurrency=1 (Phase 2 plan): avoids concurrent large ingestion jobs
+    # compounding memory pressure on the same worker process.
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Q ingestion
 
   celery-beat:
     build:

@@ -84,6 +84,40 @@ class Settings(BaseSettings):
 
     MAX_UPLOAD_SIZE_MB: int = 5000
 
+    # Legacy (pre-v7.3) MATLAB .mat files are read via scipy.io.loadmat,
+    # which has no chunked/partial-read API — the whole file loads into
+    # memory in one call regardless of size. v7.3 .mat files are HDF5
+    # under the hood and CAN be read in slices (see mat_parser.py), so
+    # this threshold only rejects the legacy format, with a clear message
+    # pointing at the real alternative (re-save as v7.3 in MATLAB, the
+    # default for files over 2GB there anyway) rather than attempting a
+    # load that risks OOMing the ingestion worker.
+    LEGACY_MAT_MAX_SIZE_MB: int = 2000
+
+    # --- Ingestion worker timeouts (Phase 2) ---
+    #
+    # A single global timeout doesn't fit an ingestion job whose duration
+    # scales with file size across a 50GB-TB range — these two settings
+    # let the per-task soft time limit (set in celery_app.py, computed
+    # per-dispatch from the actual file's size_bytes) scale instead of
+    # being one fixed number. Both are configurable via env var rather
+    # than hardcoded specifically because the "right" throughput assumption
+    # depends on real deployment network/disk characteristics this
+    # codebase has no way to know in advance — the values below are
+    # documented starting assumptions, not measured production numbers.
+    #
+    # Baseline: a small/instant allowance so trivial files aren't held to
+    # an unreasonably long deadline for no reason.
+    INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS: int = 300
+    # Per-GB allowance added on top of the baseline, assuming a
+    # deliberately conservative effective throughput (~50MB/s) that
+    # covers download-from-MinIO + parse + convert + upload-processed-
+    # artifact combined, not just raw network transfer — chosen to be
+    # comfortably generous rather than tightly tuned, since the failure
+    # mode of "cut off too early" (aborts real work) is worse than "runs
+    # a bit long" for a background job with no user waiting synchronously.
+    INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB: int = 180
+
     # --- Subset extraction (Master Plan §3 Phase 5) ---
     EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
     EXTRACTION_SYNC_THRESHOLD_MB: int = 10

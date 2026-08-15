@@ -119,3 +119,69 @@ class TestS3CompatibleBackend:
     def test_ensure_bucket_is_idempotent(self, storage):
         storage.ensure_bucket("bodp-vps")
         storage.ensure_bucket("bodp-vps")
+
+
+class TestMultipartUpload:
+    def test_full_multipart_roundtrip(self, storage):
+        key = f"test/multipart-{uuid.uuid4()}.bin"
+        upload_id = storage.create_multipart_upload("bodp-vps", key, content_type="application/octet-stream")
+        assert upload_id
+
+        # S3-compatible multipart requires every part except the last to be
+        # >= 5MiB — use two parts sized just over that floor so the test
+        # exercises real multi-part completion, not a degenerate 1-part case.
+        part_size = 5 * 1024 * 1024 + 1
+        part1 = bytes([1]) * part_size
+        part2 = b"final part, can be small"
+
+        import urllib.request
+
+        etags = []
+        for part_number, data in enumerate([part1, part2], start=1):
+            url = storage.presign_upload_part(
+                "bodp-vps", key, upload_id=upload_id, part_number=part_number, expires_in_seconds=60
+            )
+            req = urllib.request.Request(url, data=data, method="PUT")
+            with urllib.request.urlopen(req) as resp:
+                assert resp.status in (200, 204)
+                etags.append(resp.headers.get("ETag").strip('"'))
+
+        parts = storage.list_parts("bodp-vps", key, upload_id=upload_id)
+        assert len(parts) == 2
+        assert {p["PartNumber"] for p in parts} == {1, 2}
+
+        stored = storage.complete_multipart_upload(
+            "bodp-vps",
+            key,
+            upload_id=upload_id,
+            parts=[{"PartNumber": i + 1, "ETag": etags[i]} for i in range(2)],
+        )
+        assert stored.size_bytes == len(part1) + len(part2)
+
+        body = storage.get("bodp-vps", key)
+        assert body.read() == part1 + part2
+
+        storage.delete("bodp-vps", key)
+
+    def test_abort_multipart_upload_discards_parts(self, storage):
+        key = f"test/multipart-abort-{uuid.uuid4()}.bin"
+        upload_id = storage.create_multipart_upload("bodp-vps", key)
+
+        storage.abort_multipart_upload("bodp-vps", key, upload_id=upload_id)
+
+        # Aborting releases the session — no parts remain, and the object
+        # itself was never created.
+        assert storage.list_parts("bodp-vps", key, upload_id=upload_id) == []
+        assert storage.exists("bodp-vps", key) is False
+
+    def test_abort_multipart_upload_is_idempotent(self, storage):
+        key = f"test/multipart-abort-twice-{uuid.uuid4()}.bin"
+        upload_id = storage.create_multipart_upload("bodp-vps", key)
+
+        storage.abort_multipart_upload("bodp-vps", key, upload_id=upload_id)
+        # Aborting an already-aborted (now nonexistent) session must not raise.
+        storage.abort_multipart_upload("bodp-vps", key, upload_id=upload_id)
+
+    def test_list_parts_empty_for_unknown_upload_id(self, storage):
+        key = f"test/multipart-unknown-{uuid.uuid4()}.bin"
+        assert storage.list_parts("bodp-vps", key, upload_id="nonexistent-upload-id") == []

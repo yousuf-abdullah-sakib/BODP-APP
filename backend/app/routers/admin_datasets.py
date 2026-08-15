@@ -16,9 +16,23 @@ from app.schemas.admin_datasets import (
     DatasetPermanentDeleteConfirm,
     DatasetUpdate,
 )
-from app.schemas.datasets import DatasetFilePublic, DatasetFileUploadResponse, UploadStatusResponse
-from app.services import admin_datasets_service
+from app.schemas.datasets import (
+    DatasetFilePublic,
+    DatasetFileUploadResponse,
+    MultipartUploadCompleteResponse,
+    MultipartUploadInitiateRequest,
+    MultipartUploadInitiateResponse,
+    MultipartUploadPartCompleteRequest,
+    MultipartUploadPresignPartResponse,
+    UploadStatusResponse,
+)
+from app.services import admin_datasets_service, dataset_multipart_upload_service, settings_service
 from app.services.dataset_file_service import DatasetFileUploadError, upload_dataset_file
+from app.services.dataset_multipart_upload_service import (
+    PART_SIZE_BYTES,
+    DatasetMultipartUploadError,
+)
+from app.worker.celery_app import ingestion_soft_time_limit_seconds
 from app.worker.tasks.ingestion import process_dataset_file
 
 router = APIRouter(prefix="/admin/datasets", tags=["admin-datasets"])
@@ -230,6 +244,8 @@ async def upload_dataset_file_endpoint(
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
+    site_settings = await settings_service.get_settings(db)
+
     try:
         upload, dataset_file = await upload_dataset_file(
             db,
@@ -237,11 +253,15 @@ async def upload_dataset_file_endpoint(
             filename=file.filename,
             file_stream=file,
             uploaded_by=current_user.id,
+            max_upload_size_mb=site_settings.max_upload_size_mb,
         )
     except DatasetFileUploadError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
 
-    task = process_dataset_file.delay(str(dataset_file.id), str(upload.id))
+    task = process_dataset_file.apply_async(
+        args=[str(dataset_file.id), str(upload.id)],
+        soft_time_limit=ingestion_soft_time_limit_seconds(dataset_file.file_size_bytes),
+    )
     upload.celery_task_id = task.id
     await db.commit()
     await db.refresh(upload)
@@ -257,6 +277,135 @@ async def upload_dataset_file_endpoint(
         upload=UploadStatusResponse.model_validate(upload),
         dataset_file=DatasetFilePublic.model_validate(dataset_file),
     )
+
+
+@router.post(
+    "/{dataset_id}/uploads/initiate",
+    response_model=MultipartUploadInitiateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def initiate_multipart_upload_endpoint(
+    dataset_id: uuid.UUID,
+    payload: MultipartUploadInitiateRequest,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Starts a direct-to-MinIO multipart upload for a large file — the
+    browser PUTs each part's bytes straight to storage using presigned
+    URLs from the endpoint below; this backend process never sees the
+    file's bytes at all (Phase 1: large uploads bypass FastAPI entirely,
+    unlike the single-request /{dataset_id}/files endpoint above, which
+    remains unchanged for small files)."""
+    site_settings = await settings_service.get_settings(db)
+    try:
+        upload, total_parts = await dataset_multipart_upload_service.initiate_multipart_upload(
+            db,
+            dataset_id=dataset_id,
+            filename=payload.filename,
+            total_size_bytes=payload.total_size_bytes,
+            uploaded_by=current_user.id,
+            max_upload_size_mb=site_settings.max_upload_size_mb,
+        )
+    except DatasetMultipartUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    return MultipartUploadInitiateResponse(
+        upload=UploadStatusResponse.model_validate(upload),
+        total_parts=total_parts,
+        part_size_bytes=PART_SIZE_BYTES,
+    )
+
+
+@router.post(
+    "/uploads/{upload_id}/parts/{part_number}/presign",
+    response_model=MultipartUploadPresignPartResponse,
+)
+async def presign_upload_part_endpoint(
+    upload_id: uuid.UUID,
+    part_number: int,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        url = await dataset_multipart_upload_service.presign_part(
+            db, upload_id=upload_id, part_number=part_number
+        )
+    except DatasetMultipartUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return MultipartUploadPresignPartResponse(part_number=part_number, upload_url=url)
+
+
+@router.post("/uploads/{upload_id}/parts/complete", response_model=UploadStatusResponse)
+async def mark_part_uploaded_endpoint(
+    upload_id: uuid.UUID,
+    payload: MultipartUploadPartCompleteRequest,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Called by the browser right after each part's direct PUT to MinIO
+    succeeds — drives the real upload-progress figure (uploaded_bytes)
+    from confirmed part completions rather than a client-side guess."""
+    try:
+        upload = await dataset_multipart_upload_service.mark_part_uploaded(
+            db,
+            upload_id=upload_id,
+            part_number=payload.part_number,
+            size_bytes=payload.size_bytes,
+        )
+    except DatasetMultipartUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return upload
+
+
+@router.post("/uploads/{upload_id}/complete", response_model=MultipartUploadCompleteResponse)
+async def complete_multipart_upload_endpoint(
+    upload_id: uuid.UUID,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Finalizes the multipart session (verified against storage's own
+    list_parts(), not just what the client claims) and dispatches the same
+    ingestion task the small-file path uses — one ingestion pipeline
+    regardless of how the raw file arrived in storage."""
+    try:
+        upload, dataset_file = await dataset_multipart_upload_service.complete_multipart_upload(
+            db, upload_id=upload_id
+        )
+    except DatasetMultipartUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    task = process_dataset_file.apply_async(
+        args=[str(dataset_file.id), str(upload.id)],
+        soft_time_limit=ingestion_soft_time_limit_seconds(dataset_file.file_size_bytes),
+    )
+    upload.celery_task_id = task.id
+    await db.commit()
+    await db.refresh(upload)
+    await db.refresh(dataset_file)
+
+    return MultipartUploadCompleteResponse(
+        upload=UploadStatusResponse.model_validate(upload),
+        dataset_file=DatasetFilePublic.model_validate(dataset_file),
+    )
+
+
+@router.post("/uploads/{upload_id}/cancel", response_model=UploadStatusResponse)
+async def cancel_upload_endpoint(
+    upload_id: uuid.UUID,
+    current_user: User = Depends(require_permission("Edit Datasets")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Cancels an upload at any stage — mid-multipart-transfer, queued
+    (fully uploaded, not yet processing), or mid-processing. See
+    dataset_multipart_upload_service.cancel_upload's docstring for exactly
+    what happens at each stage; this endpoint is intentionally a single
+    entry point regardless of stage so the frontend never needs to know
+    which cleanup path applies."""
+    try:
+        upload = await dataset_multipart_upload_service.cancel_upload(db, upload_id=upload_id)
+    except DatasetMultipartUploadError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+    return upload
 
 
 @router.get("/{dataset_id}/uploads", response_model=list[UploadStatusResponse])

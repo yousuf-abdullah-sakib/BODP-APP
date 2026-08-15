@@ -65,7 +65,7 @@ export type QualityFlag = "normal" | "caution" | "alert";
 
 export interface DatasetRecordPreview {
   id: string;
-  time: string;
+  time: string | null;
   location: string | null;
   depth_m: number | null;
   parameter: string;
@@ -96,4 +96,19 @@ export interface TaxonomyOptions {
   sources: string[];
   platforms: string[];
   formats: string[];
+}
+
+export interface SchemaFilterVariable {
+  name: string;
+  data_type: string;
+  is_dimension: boolean;
+  roles: string[];
+  min_value: number | null;
+  max_value: number | null;
+  distinct_values: string[] | null;
+}
+
+export interface DatasetSchemaFilters {
+  reviewed_at: string;
+  variables: SchemaFilterVariable[];
 }

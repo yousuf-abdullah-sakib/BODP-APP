@@ -47,6 +47,26 @@ def netcdf_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def netcdf_file_valid_time(tmp_path: Path) -> Path:
+    """ERA5/Copernicus-style file using 'valid_time' instead of 'time' as
+    its time coordinate name — matches the real Model Wave Data upload
+    that revealed this gap (netcdf_parser.py's _TIME_NAMES didn't include
+    it, so the file's genuine time coordinate went undetected)."""
+    p = tmp_path / "sample_valid_time.nc"
+    times = pd.date_range("2024-01-01", periods=5)
+    lats = np.array([20.5, 21.0])
+    lons = np.array([90.0, 90.5])
+    rng = np.random.default_rng(7)
+    wind = rng.random((5, 2, 2)) * 10
+    ds = xr.Dataset(
+        {"u10": (("valid_time", "lat", "lon"), wind)},
+        coords={"valid_time": times, "lat": lats, "lon": lons},
+    )
+    ds.to_netcdf(p)
+    return p
+
+
+@pytest.fixture
 def legacy_mat_file(tmp_path: Path) -> Path:
     p = tmp_path / "sample_legacy.mat"
     n = 10
@@ -182,6 +202,88 @@ class TestNetcdfParser:
         assert "sea_surface_temp" in df.columns
         assert "lat" in df.columns and "lon" in df.columns
 
+    def test_detects_valid_time_coordinate(self, netcdf_file_valid_time):
+        """Regression test for the real Model Wave Data ERA5 file: the time
+        coordinate is named 'valid_time', not 'time' — must still be
+        detected so temporal extent AND the extra.time_col value (which
+        ingestion._write_dataset_records relies on) are both populated."""
+        parser = get_parser_for_format("nc")
+        meta = parser.parse(netcdf_file_valid_time)
+        assert meta.temporal_start.isoformat() == "2024-01-01"
+        assert meta.temporal_end.isoformat() == "2024-01-05"
+        assert meta.extra["time_col"] == "valid_time"
+
+    def test_to_processed_spans_multiple_time_chunks(self, tmp_path):
+        """Phase 2 regression test: proves the Dask/time-chunked rewrite
+        produces the exact same row count/values whether a file fits in
+        one chunk (_TIME_CHUNK_SIZE=24) or spans several — not just
+        correct on the 5-timestep fixture, which would also pass with the
+        old single ds.to_dataframe() call and wouldn't catch a chunking
+        bug."""
+        from app.services.parsers.netcdf_parser import _TIME_CHUNK_SIZE
+
+        n_time = _TIME_CHUNK_SIZE * 2 + 10  # spans 3 chunks
+        times = pd.date_range("2024-01-01", periods=n_time, freq="D")
+        lats = np.array([20.5, 21.0])
+        lons = np.array([90.0, 90.5])
+        rng = np.random.default_rng(9)
+        sst = rng.random((n_time, 2, 2)) * 30
+        ds = xr.Dataset(
+            {"sea_surface_temp": (("time", "lat", "lon"), sst)},
+            coords={"time": times, "lat": lats, "lon": lons},
+        )
+        p = tmp_path / "multi_chunk.nc"
+        ds.to_netcdf(p)
+
+        parser = get_parser_for_format("nc")
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.is_zarr is False
+        assert artifact.row_count == n_time * 2 * 2
+
+        df = pd.read_parquet(artifact.local_path)
+        assert len(df) == n_time * 2 * 2
+        assert df["sea_surface_temp"].min() == pytest.approx(sst.min(), rel=1e-5)
+        assert df["sea_surface_temp"].max() == pytest.approx(sst.max(), rel=1e-5)
+
+    def test_large_dataset_produces_zarr_instead_of_parquet(self, tmp_path, monkeypatch):
+        """Above the size heuristic, to_processed() must switch to a
+        chunked Zarr store rather than attempting a flattened Parquet
+        conversion — verifies both the format switch and that the
+        resulting Zarr store round-trips back to the exact same data via
+        xarray, proving it's a genuinely valid, readable store and not
+        just "a file got written somewhere."""
+        import zarr
+
+        from app.services.parsers.netcdf_parser import NetcdfParser
+        import app.services.parsers.netcdf_parser as netcdf_module
+
+        monkeypatch.setattr(netcdf_module, "_ZARR_THRESHOLD_ELEMENTS", 10)
+
+        n_time = 20
+        times = pd.date_range("2024-01-01", periods=n_time, freq="D")
+        lats = np.linspace(20.0, 21.0, 4)
+        lons = np.linspace(90.0, 91.0, 4)
+        rng = np.random.default_rng(5)
+        sst = rng.random((n_time, 4, 4)) * 30
+        ds = xr.Dataset(
+            {"sea_surface_temp": (("time", "lat", "lon"), sst)},
+            coords={"time": times, "lat": lats, "lon": lons},
+        )
+        p = tmp_path / "large.nc"
+        ds.to_netcdf(p)
+
+        parser = NetcdfParser()
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.is_zarr is True
+        assert artifact.file_extension == "zarr.zip"
+        assert artifact.row_count is None
+        assert artifact.local_path.exists()
+
+        store = zarr.storage.ZipStore(str(artifact.local_path), mode="r")
+        reopened = xr.open_zarr(store, consolidated=False)
+        assert dict(reopened.sizes) == {"time": n_time, "lat": 4, "lon": 4}
+        assert np.allclose(reopened["sea_surface_temp"].values, sst, rtol=1e-5)
+
     def test_rejects_text_file_disguised_as_netcdf(self, tmp_path):
         fake = tmp_path / "fake.nc"
         fake.write_text("this is not a netcdf file, just plain text")
@@ -242,6 +344,47 @@ class TestMatParser:
         artifact = parser.to_processed(v73_mat_file, tmp_path)
         assert artifact.row_count == 10
         assert artifact.file_extension == "parquet"
+
+    def test_v73_mat_to_processed_spans_multiple_chunks(self, tmp_path):
+        """Phase 2 regression test: proves the chunked v7.3 rewrite
+        produces the exact same row count/values whether a file fits in
+        one chunk or spans several — not just correct on a tiny 10-row
+        fixture, which would also pass with the old eager
+        (non-chunked) implementation and wouldn't catch a chunking bug."""
+        from app.services.parsers.mat_parser import _MAT_CHUNK_ROWS
+
+        n = _MAT_CHUNK_ROWS * 2 + 500  # spans 3 chunks
+        p = tmp_path / "multi_chunk_v73.mat"
+        with h5py.File(p, "w", userblock_size=512) as f:
+            f.create_dataset("lat", data=np.linspace(20.0, 21.0, n))
+            f.create_dataset("lon", data=np.linspace(90.0, 91.0, n))
+            f.create_dataset("temperature", data=np.linspace(25.0, 30.0, n))
+        with open(p, "r+b") as f:
+            header = b"MATLAB 7.3 MAT-file, Platform: PCWIN64, Created on: test" + b" " * 60
+            f.seek(0)
+            f.write(header[:116])
+
+        parser = get_parser_for_format("mat")
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.row_count == n
+
+        df = pd.read_parquet(artifact.local_path)
+        assert len(df) == n
+        assert df["temperature"].min() == pytest.approx(25.0)
+        assert df["temperature"].max() == pytest.approx(30.0)
+
+    def test_rejects_legacy_mat_above_size_threshold(self, legacy_mat_file, monkeypatch):
+        """A legacy (pre-v7.3) .mat file above LEGACY_MAT_MAX_SIZE_MB is
+        rejected with a clear, actionable message rather than attempting
+        scipy.io.loadmat's eager full-file read — that library has no
+        chunked-read API, so there is no safe way to process a large
+        legacy file at all; the fix is re-saving as v7.3."""
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "LEGACY_MAT_MAX_SIZE_MB", 0)
+        parser = get_parser_for_format("mat")
+        with pytest.raises(ParserError, match="exceeds the 0MB limit"):
+            parser.parse(legacy_mat_file)
 
     def test_rejects_garbage_mat(self, tmp_path):
         bad = tmp_path / "fake.mat"

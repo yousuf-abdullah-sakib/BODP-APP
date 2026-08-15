@@ -68,12 +68,27 @@ class ProcessedArtifact:
     FileParser.to_processed() — tabular formats still produce Parquet;
     GeoTIFF produces a re-tiled Cloud-Optimized GeoTIFF instead, and the
     ingestion pipeline no longer assumes a row count applies to every format.
+
+    Phase 2: large, genuinely multidimensional NetCDF may produce a Zarr
+    store instead of a flattened Parquet table (see netcdf_parser.py's
+    size/dimensionality heuristic) — `is_zarr=True` signals this so the
+    ingestion pipeline knows NOT to attempt _write_dataset_records against
+    it (that function reads a Parquet file; a Zarr-backed file has no
+    tidy-table row concept at all, same reasoning as why raster/GeoTIFF is
+    already skipped). A Zarr store is architecturally a directory of many
+    chunk objects, not one blob (see FileParser's docstring below) — rather
+    than changing the storage layer to accept multi-object artifacts,
+    `local_path` still points at a single file: the Zarr store zipped into
+    one `.zarr.zip` container, which Zarr's own tooling (and xarray) can
+    read directly without unpacking. This is the "simpler near-term bridge"
+    this interface's docstring already anticipated.
     """
 
     local_path: Path
     content_type: str
-    file_extension: str  # no leading dot, e.g. "parquet" or "cog.tif"
-    row_count: int | None = None  # tabular only
+    file_extension: str  # no leading dot, e.g. "parquet", "cog.tif", "zarr.zip"
+    row_count: int | None = None  # tabular (Parquet) only
+    is_zarr: bool = False
 
 
 class FileParser(ABC):
@@ -85,14 +100,19 @@ class FileParser(ABC):
     Extensibility note (formats beyond today's CSV/NetCDF/.mat/GeoTIFF):
     - Additional single-file gridded/raster formats slot in exactly like
       GeoTiffParser — implement parse()/to_processed() against DataShape.RASTER.
-    - Zarr is architecturally different: a Zarr "file" is actually a
-      directory of many small chunk objects, not one blob. Supporting it
-      will need the upload endpoint and raw_key()/storage layer to accept a
-      directory tree (or a single .zip/.zarr.zip container, which current
-      tooling can read directly without unpacking — the simpler bridge into
-      today's single-object pipeline if/when Zarr support is added) rather
-      than a single-file upload. That is a storage/upload-layer change, not
-      a FileParser one — this interface itself does not need to change for it.
+    - Zarr as an UPLOAD format (raw/ input) is still architecturally
+      deferred — a Zarr store as the *source* file is a directory of many
+      small chunk objects, not one blob, and would need the upload
+      endpoint/raw_key()/storage layer to accept a directory tree or a
+      `.zarr.zip` container as raw input. That remains future work.
+    - Zarr as a PROCESSED/OUTPUT format (Phase 2), however, IS implemented:
+      NetcdfParser.to_processed() writes large, genuinely multidimensional
+      datasets as a Zarr store zipped into a single `.zarr.zip`
+      ProcessedArtifact (is_zarr=True) — the "simpler bridge" this note
+      used to only anticipate. This works today specifically because
+      to_processed()'s OUTPUT already flows through this interface's
+      existing single-local_path contract; it's the raw UPLOAD path that
+      still needs the directory-tree/storage-layer change described above.
     """
 
     #: File extensions (lowercase, no leading dot) this parser declares

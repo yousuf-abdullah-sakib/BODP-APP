@@ -20,6 +20,7 @@ from app.routers import (
     admin_categories,
     admin_cms,
     admin_contact,
+    admin_dataset_schema,
     admin_datasets,
     admin_media,
     admin_overview,
@@ -73,6 +74,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_datasets.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_dataset_schema.router, prefix=settings.API_V1_PREFIX)
     app.include_router(catalog.router, prefix=settings.API_V1_PREFIX)
     app.include_router(requests.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_requests.router, prefix=settings.API_V1_PREFIX)

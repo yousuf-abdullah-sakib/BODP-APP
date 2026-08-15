@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import DashboardShell, { type DashNavGroup } from "@/components/dashboard/DashboardShell";
 import { getAdminRequests } from "@/lib/api/admin-requests";
 import { getUnreadCount } from "@/lib/api/me";
+import AdminDatasetSchemaReviewSection from "./sections/AdminDatasetSchemaReviewSection";
 import AdminDatasetsSection from "./sections/AdminDatasetsSection";
 import AdminManagementSection from "./sections/AdminManagementSection";
 import AdminNotificationsSection from "./sections/AdminNotificationsSection";
@@ -69,6 +70,7 @@ export default function AdminClient() {
         { key: "datasets", label: "Datasets", icon: "🗄️" },
         { key: "categories", label: "Dataset Categories", icon: "🏷️" },
         { key: "quality", label: "Data Quality Check", icon: "🧪" },
+        { key: "schema-review", label: "Schema Review", icon: "🧬" },
       ],
     },
     {
@@ -130,6 +132,7 @@ export default function AdminClient() {
       {active === "datasets" && <AdminDatasetsSection />}
       {active === "categories" && <DatasetCategoriesSection />}
       {active === "quality" && <DataQualityCheckSection />}
+      {active === "schema-review" && <AdminDatasetSchemaReviewSection />}
       {active === "users" && <UsersSection />}
       {active === "roles" && <RolesPermissionsSection />}
       {active === "admin-team" && <AdminManagementSection />}

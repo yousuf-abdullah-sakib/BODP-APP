@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { getDatasetRecords, getDatasetStations } from "@/lib/api/catalog";
+import { getDatasetRecords, getDatasetSchema, getDatasetStations } from "@/lib/api/catalog";
 import type {
   DatasetDetail,
   DatasetRecordPreview,
+  DatasetSchemaFilters,
   QualityBreakdown,
   StationOption,
 } from "@/lib/types/catalog";
@@ -62,11 +63,18 @@ export function useDatasetFilters(dataset: DatasetDetail) {
   const [datasetTotalCount, setDatasetTotalCount] = useState(0);
   const [qualityBreakdown, setQualityBreakdown] = useState<QualityBreakdown>(EMPTY_BREAKDOWN);
   const [loading, setLoading] = useState(true);
+  // null = not yet reviewed (or still loading) — the fallback signal that
+  // makes DatasetDetailClient render today's fixed dataset.parameters-
+  // driven filters instead of schema-driven ones (PLAN.md Phase 4).
+  const [schema, setSchema] = useState<DatasetSchemaFilters | null>(null);
 
   useEffect(() => {
     getDatasetStations(dataset.id)
       .then(setStationOptions)
       .catch(() => setStationOptions([]));
+    getDatasetSchema(dataset.id)
+      .then(setSchema)
+      .catch(() => setSchema(null));
   }, [dataset.id]);
 
   useEffect(() => {
@@ -138,5 +146,6 @@ export function useDatasetFilters(dataset: DatasetDetail) {
     activeCount,
     stationOptions,
     loading,
+    schema,
   };
 }

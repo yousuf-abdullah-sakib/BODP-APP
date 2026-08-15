@@ -9,9 +9,14 @@ import type {
   StatisticsResponse,
   TimeSeriesRequest,
   TimeSeriesResponse,
+  VisualizableDatasetSummary,
   VizFilterParams,
 } from "@/lib/types/visualize";
 import type { StationOption } from "@/lib/types/catalog";
+
+export async function getVisualizableDatasets(): Promise<VisualizableDatasetSummary[]> {
+  return apiFetch<VisualizableDatasetSummary[]>("/visualize/datasets");
+}
 
 export async function postTimeseries(body: TimeSeriesRequest): Promise<TimeSeriesResponse> {
   return apiFetch<TimeSeriesResponse>("/visualize/timeseries", { method: "POST", body });

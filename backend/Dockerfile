@@ -38,6 +38,12 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8000/api/health || exit 1
 
+# --timeout 600: coordinated with nginx/conf.d/bodp.conf's proxy_read/
+# send_timeout (Phase 2) — large dataset files bypass this process
+# entirely via Phase 1's direct-to-MinIO presigned multipart upload, but
+# the small-file fallback path and any other proxied request still flow
+# through here, so this must stay >= Nginx's timeout to avoid Gunicorn
+# cutting a worker Nginx is still willing to wait on.
 CMD ["gunicorn", "app.main:app", "--worker-class", "uvicorn.workers.UvicornWorker", \
-     "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "120", \
+     "--bind", "0.0.0.0:8000", "--workers", "4", "--timeout", "600", \
      "--access-logfile", "-", "--error-logfile", "-"]

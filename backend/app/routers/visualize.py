@@ -15,11 +15,20 @@ from app.schemas.visualize import (
     StatisticsResponse,
     TimeSeriesRequest,
     TimeSeriesResponse,
+    VisualizableDatasetSummary,
     VizFilterParams,
 )
 from app.services import visualize_service
 
 router = APIRouter(prefix="/visualize", tags=["visualize"])
+
+
+@router.get("/datasets", response_model=list[VisualizableDatasetSummary])
+async def visualizable_datasets(db: AsyncSession = Depends(get_db)):
+    """Backs the Visualize module's dataset selector (PLAN.md Phase 4) —
+    only datasets an admin has reviewed with at least one approved
+    Visualization Variable appear here."""
+    return await visualize_service.get_visualizable_datasets(db)
 
 
 @router.post("/timeseries", response_model=TimeSeriesResponse)

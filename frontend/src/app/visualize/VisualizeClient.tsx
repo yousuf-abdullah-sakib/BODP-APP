@@ -1,9 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { getCatalogTaxonomy } from "@/lib/api/catalog";
-import type { TaxonomyOptions } from "@/lib/types/catalog";
 import { useVizFilters } from "./useVizFilters";
 import { useVizComputeLimits } from "./useVizComputeLimits";
 import TemporalModule from "./modules/TemporalModule";
@@ -48,21 +46,23 @@ function FilterGroup({ title, icon, defaultOpen = true, children }: { title: str
 
 export default function VisualizeClient() {
   const [module, setModule] = useState<ModuleKey>("temporal");
-  const { filters, update, resetFilters, filteredStations, activeCount } = useVizFilters();
+  const {
+    filters,
+    update,
+    resetFilters,
+    filteredStations,
+    activeCount,
+    datasets,
+    datasetsLoading,
+    selectedDataset,
+    availableParams,
+    selectDataset,
+  } = useVizFilters();
   const limits = useVizComputeLimits();
   const [showTrend, setShowTrend] = useState(true);
   const [showMA, setShowMA] = useState(true);
   const [aoiClearSignal, setAoiClearSignal] = useState(0);
   const [aoi, setAoi] = useState<SpatialAOI | null>(null);
-  const [taxonomy, setTaxonomy] = useState<TaxonomyOptions | null>(null);
-
-  useEffect(() => {
-    getCatalogTaxonomy()
-      .then(setTaxonomy)
-      .catch(() => setTaxonomy(null));
-  }, []);
-
-  const availableParams = taxonomy?.parameters ?? [];
 
   // Live AOI area feedback — only meaningful for the Spatial module, since
   // AOI area is a spatial-only limit. Warn-only: the AOI is never silently
@@ -166,19 +166,35 @@ export default function VisualizeClient() {
 
           <FilterGroup title="Dataset" icon="📦">
             <div className="ctrl-group">
-              <label className="ctrl-label">Category</label>
-              <select className="ctrl-select" value={filters.category} onChange={(e) => update("category", e.target.value)}>
-                <option value="">All Categories</option>
-                {(taxonomy?.categories ?? []).map((c) => (
-                  <option key={c} value={c}>
-                    {c}
+              <label className="ctrl-label">Dataset</label>
+              <select
+                className="ctrl-select"
+                value={filters.datasetId}
+                onChange={(e) => selectDataset(e.target.value)}
+              >
+                <option value="">
+                  {datasetsLoading ? "Loading datasets…" : "Select a dataset…"}
+                </option>
+                {datasets.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.title} ({d.code})
                   </option>
                 ))}
               </select>
+              {!datasetsLoading && datasets.length === 0 && (
+                <p className="gis-caption" style={{ marginBottom: 0 }}>
+                  No datasets have an approved schema for visualization yet.
+                </p>
+              )}
             </div>
             <div className="ctrl-group">
               <label className="ctrl-label">Parameter / Variable</label>
-              <select className="ctrl-select" value={filters.parameter} onChange={(e) => update("parameter", e.target.value)}>
+              <select
+                className="ctrl-select"
+                value={filters.parameter}
+                onChange={(e) => update("parameter", e.target.value)}
+                disabled={!selectedDataset}
+              >
                 {availableParams.map((p) => (
                   <option key={p} value={p}>
                     {p}
@@ -303,25 +319,40 @@ export default function VisualizeClient() {
         </aside>
 
         <main className="viz-canvas">
-          <div className={`viz-module${module === "temporal" ? " active" : ""}`}>
-            {module === "temporal" && (
-              <TemporalModule filters={filters} showTrend={showTrend} showMA={showMA} />
-            )}
-          </div>
-          <div className={`viz-module${module === "spatial" ? " active" : ""}`}>
-            {module === "spatial" && spatial.mapPanel}
-          </div>
-          <div className={`viz-module${module === "comparison" ? " active" : ""}`}>
-            {module === "comparison" && (
-              <ComparisonModule filters={filters} availableParameters={availableParams} />
-            )}
-          </div>
-          <div className={`viz-module${module === "statistics" ? " active" : ""}`}>
-            {module === "statistics" && <StatisticsModule filters={filters} />}
-          </div>
+          {!selectedDataset ? (
+            <div className="empty-state">
+              <div className="es-icon">📦</div>
+              <p>
+                {datasetsLoading
+                  ? "Loading available datasets…"
+                  : "Select a dataset from the Filters panel to begin exploring its approved variables."}
+              </p>
+            </div>
+          ) : (
+            <>
+              <div className={`viz-module${module === "temporal" ? " active" : ""}`}>
+                {module === "temporal" && (
+                  <TemporalModule filters={filters} showTrend={showTrend} showMA={showMA} />
+                )}
+              </div>
+              <div className={`viz-module${module === "spatial" ? " active" : ""}`}>
+                {module === "spatial" && spatial.mapPanel}
+              </div>
+              <div className={`viz-module${module === "comparison" ? " active" : ""}`}>
+                {module === "comparison" && (
+                  <ComparisonModule filters={filters} availableParameters={availableParams} />
+                )}
+              </div>
+              <div className={`viz-module${module === "statistics" ? " active" : ""}`}>
+                {module === "statistics" && <StatisticsModule filters={filters} />}
+              </div>
+            </>
+          )}
         </main>
 
-        {module === "spatial" && <aside className="ctrl-panel ctrl-panel-right">{spatial.toolsPanel}</aside>}
+        {module === "spatial" && selectedDataset && (
+          <aside className="ctrl-panel ctrl-panel-right">{spatial.toolsPanel}</aside>
+        )}
       </div>
     </>
   );

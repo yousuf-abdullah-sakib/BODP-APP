@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -15,10 +15,19 @@ if TYPE_CHECKING:
 
 
 class UploadStatus(StrEnum):
+    # INITIATED: a multipart session has been created in storage but no
+    # parts have been PUT yet (or completion hasn't been confirmed) — the
+    # single-request small-file path never enters this state, it starts
+    # directly at QUEUED once the whole file is already in storage.
+    INITIATED = "initiated"
     QUEUED = "queued"
     PROCESSING = "processing"
     COMPLETE = "complete"
     FAILED = "failed"
+    # CANCELLED is deliberately distinct from FAILED — FAILED means
+    # ingestion/validation rejected the file; CANCELLED means the
+    # admin/user explicitly aborted before or during upload/processing.
+    CANCELLED = "cancelled"
 
 
 class QualityIssueType(StrEnum):
@@ -60,6 +69,23 @@ class Upload(UUIDPKMixin, Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     celery_task_id: Mapped[str | None] = mapped_column(String(255))
+
+    # --- Multipart upload session state (Phase 1) ---
+    # All nullable: the existing single-request small-file path never
+    # populates any of these — it uploads the whole file in one call and
+    # only ever creates an Upload row after the object already exists in
+    # storage, so it has no "session" to track.
+    multipart_upload_id: Mapped[str | None] = mapped_column(String(255))
+    storage_bucket: Mapped[str | None] = mapped_column(String(255))
+    storage_key: Mapped[str | None] = mapped_column(String(1024))
+    total_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    total_parts: Mapped[int | None] = mapped_column(Integer)
+    uploaded_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+    # --- Processing progress (Phase 1 plumbing; populated by ingestion in
+    # Phase 2 once the pipeline is chunked and can report real sub-stages) ---
+    progress_stage: Mapped[str | None] = mapped_column(String(50))
+    progress_pct: Mapped[int | None] = mapped_column(Integer)
 
 
 class QualityIssue(UUIDPKMixin, Base):

@@ -43,6 +43,10 @@ PERMISSION_LIST = [
     "View Audit Log",
     # Contact form submissions + support tickets admin surfaces.
     "Manage Support",
+    # Phase 3 (large-dataset ingestion roadmap) — admin schema review /
+    # variable role assignment, distinct from routine "Edit Datasets" so it
+    # can be delegated independently.
+    "Review Datasets",
 ]
 
 

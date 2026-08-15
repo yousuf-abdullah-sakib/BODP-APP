@@ -10,10 +10,14 @@ from app.schemas.requests import SpatialBoundsSchema
 class VizFilterParams(BaseModel):
     """Shared filter shape across all 4 /visualize/* endpoints — mirrors
     the frontend's useVizFilters.ts VizFilters interface exactly (category/
-    parameter/station/date range/resolution/bbox/depth), cutting across
-    datasets rather than being scoped to one, unlike catalog's
-    RecordsFilter."""
+    parameter/station/date range/resolution/bbox/depth).
 
+    dataset_id (PLAN.md Phase 4) scopes every query to one dataset's
+    approved schema, once the frontend's dataset selector is in use.
+    Nullable/optional for back-compat — omitting it preserves the
+    pre-Phase-4 cross-dataset query behavior exactly (the fallback path)."""
+
+    dataset_id: uuid.UUID | None = None
     category: str | None = None
     station: str | None = None
     date_from: date | None = None
@@ -193,6 +197,20 @@ class StatisticsResponse(BaseModel):
     annual_anomalies: list[AnnualAnomaly]
     decomposition: DecompositionSchema
     calendar_heatmap: CalendarHeatmap
+
+
+# --- Dataset scoping (PLAN.md Phase 4) ---
+
+
+class VisualizableDatasetSummary(BaseModel):
+    """One entry in the Visualize module's dataset selector — only
+    datasets an admin has reviewed (Phase 3) AND that have at least one
+    approved Visualization Variable ever appear here."""
+
+    id: uuid.UUID
+    code: str
+    title: str
+    variables: list[str]
 
 
 # --- Stations (supporting useVizFilters' filteredStations) ---

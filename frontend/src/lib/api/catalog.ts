@@ -3,6 +3,7 @@ import type {
   CatalogSearchResponse,
   DatasetDetail,
   DatasetRecordsResponse,
+  DatasetSchemaFilters,
   DatasetSort,
   StationOption,
   TaxonomyOptions,
@@ -44,6 +45,10 @@ export async function getDatasetDetail(id: string): Promise<DatasetDetail> {
 
 export async function getDatasetStations(id: string): Promise<StationOption[]> {
   return apiFetch<StationOption[]>(`/catalog/${id}/stations`, { skipAuth: true });
+}
+
+export async function getDatasetSchema(id: string): Promise<DatasetSchemaFilters | null> {
+  return apiFetch<DatasetSchemaFilters | null>(`/catalog/${id}/schema`, { skipAuth: true });
 }
 
 export interface DatasetRecordsParams {

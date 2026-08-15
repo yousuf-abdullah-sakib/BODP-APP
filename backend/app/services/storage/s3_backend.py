@@ -160,6 +160,103 @@ class S3CompatibleBackend(StorageService):
                 logger.exception("storage.ensure_bucket_failed", backend=self._name, bucket=bucket)
                 raise StorageBackendError(f"Failed to create bucket {bucket}") from exc
 
+    def create_multipart_upload(
+        self, bucket: str, key: str, *, content_type: str | None = None
+    ) -> str:
+        extra_args: dict = {}
+        if content_type:
+            extra_args["ContentType"] = content_type
+        try:
+            response = self._client.create_multipart_upload(Bucket=bucket, Key=key, **extra_args)
+        except ClientError as exc:
+            logger.exception(
+                "storage.create_multipart_upload_failed", backend=self._name, bucket=bucket, key=key
+            )
+            raise StorageBackendError(f"Failed to start multipart upload for {bucket}/{key}") from exc
+        return response["UploadId"]
+
+    def presign_upload_part(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        upload_id: str,
+        part_number: int,
+        expires_in_seconds: int = 3600,
+    ) -> str:
+        try:
+            return self._presign_client.generate_presigned_url(
+                "upload_part",
+                Params={
+                    "Bucket": bucket,
+                    "Key": key,
+                    "UploadId": upload_id,
+                    "PartNumber": part_number,
+                },
+                ExpiresIn=expires_in_seconds,
+            )
+        except ClientError as exc:
+            raise StorageBackendError(
+                f"Failed to presign part {part_number} for {bucket}/{key}"
+            ) from exc
+
+    def complete_multipart_upload(
+        self, bucket: str, key: str, *, upload_id: str, parts: list[dict]
+    ) -> StorageObject:
+        try:
+            self._client.complete_multipart_upload(
+                Bucket=bucket,
+                Key=key,
+                UploadId=upload_id,
+                MultipartUpload={"Parts": parts},
+            )
+        except ClientError as exc:
+            logger.exception(
+                "storage.complete_multipart_upload_failed", backend=self._name, bucket=bucket, key=key
+            )
+            raise StorageBackendError(f"Failed to complete multipart upload for {bucket}/{key}") from exc
+
+        stat = self.stat(bucket, key)
+        if stat is None:
+            raise StorageBackendError(
+                f"Multipart upload to {bucket}/{key} reported success but object not found"
+            )
+        return stat
+
+    def abort_multipart_upload(self, bucket: str, key: str, *, upload_id: str) -> None:
+        try:
+            self._client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            # NoSuchUpload means the session is already gone (already
+            # completed, already aborted, or expired) — idempotent no-op,
+            # matching delete()'s "absent is success" contract.
+            if error_code == "NoSuchUpload":
+                return
+            logger.exception(
+                "storage.abort_multipart_upload_failed", backend=self._name, bucket=bucket, key=key
+            )
+            raise StorageBackendError(f"Failed to abort multipart upload for {bucket}/{key}") from exc
+
+    def list_parts(self, bucket: str, key: str, *, upload_id: str) -> list[dict]:
+        try:
+            response = self._client.list_parts(Bucket=bucket, Key=key, UploadId=upload_id)
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code == "NoSuchUpload":
+                return []
+            logger.exception("storage.list_parts_failed", backend=self._name, bucket=bucket, key=key)
+            raise StorageBackendError(f"Failed to list parts for {bucket}/{key}") from exc
+
+        return [
+            {
+                "PartNumber": p["PartNumber"],
+                "ETag": p["ETag"].strip('"'),
+                "Size": p["Size"],
+            }
+            for p in response.get("Parts", [])
+        ]
+
     def set_public_prefix_policy(self, bucket: str, prefix: str) -> None:
         # put_bucket_policy REPLACES the whole policy document — this bucket
         # can have multiple public prefixes (avatars/, media/) granted at

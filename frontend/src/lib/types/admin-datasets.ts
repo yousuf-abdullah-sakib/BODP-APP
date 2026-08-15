@@ -24,9 +24,30 @@ export interface UploadStatusResponse {
   error_message: string | null;
   uploaded_at: string;
   celery_task_id: string | null;
+  total_size_bytes: number | null;
+  total_parts: number | null;
+  uploaded_bytes: number;
+  progress_stage: string | null;
+  progress_pct: number | null;
 }
 
 export interface DatasetFileUploadResponse {
+  upload: UploadStatusResponse;
+  dataset_file: DatasetFilePublic;
+}
+
+export interface MultipartUploadInitiateResponse {
+  upload: UploadStatusResponse;
+  total_parts: number;
+  part_size_bytes: number;
+}
+
+export interface MultipartUploadPresignPartResponse {
+  part_number: number;
+  upload_url: string;
+}
+
+export interface MultipartUploadCompleteResponse {
   upload: UploadStatusResponse;
   dataset_file: DatasetFilePublic;
 }

@@ -86,3 +86,54 @@ class StorageService(ABC):
         stays private and reachable only via presign_get. Used for avatars,
         which are rendered as plain <img src> URLs rather than presigned
         links. Idempotent — safe to call on every upload."""
+
+    # --- Direct-to-storage multipart upload (Phase 1: large-file uploads) ---
+    #
+    # `put()` above already does an *implicit*, backend-managed multipart
+    # transfer for anything the boto3 client itself streams — but that still
+    # proxies every byte through the FastAPI process. These five methods
+    # expose the *real* S3 multipart lifecycle so a browser can PUT parts
+    # directly to storage using short-lived presigned URLs, with the backend
+    # only ever handling small JSON control-plane requests.
+
+    @abstractmethod
+    def create_multipart_upload(
+        self, bucket: str, key: str, *, content_type: str | None = None
+    ) -> str:
+        """Starts a multipart upload session and returns its upload ID —
+        the token every subsequent part/complete/abort call is scoped to."""
+
+    @abstractmethod
+    def presign_upload_part(
+        self,
+        bucket: str,
+        key: str,
+        *,
+        upload_id: str,
+        part_number: int,
+        expires_in_seconds: int = 3600,
+    ) -> str:
+        """A temporary, signed URL allowing the client to PUT exactly one
+        part's bytes directly to storage. part_number is 1-indexed per the
+        S3 multipart API."""
+
+    @abstractmethod
+    def complete_multipart_upload(
+        self, bucket: str, key: str, *, upload_id: str, parts: list[dict]
+    ) -> StorageObject:
+        """Finalizes the upload once every part has been PUT. `parts` is a
+        list of {"PartNumber": int, "ETag": str} in ascending part order —
+        the ETags the client observed from each part's PUT response,
+        required so storage can verify nothing was corrupted/reordered."""
+
+    @abstractmethod
+    def abort_multipart_upload(self, bucket: str, key: str, *, upload_id: str) -> None:
+        """Cancels an in-progress multipart session and releases any parts
+        already uploaded — must not raise if the session is already gone
+        (idempotent, safe to call from a cleanup/cancel path)."""
+
+    @abstractmethod
+    def list_parts(self, bucket: str, key: str, *, upload_id: str) -> list[dict]:
+        """Returns the parts storage has actually received for this session
+        — {"PartNumber": int, "ETag": str, "Size": int} each — used to
+        reconcile real upload progress against what the client claims."""

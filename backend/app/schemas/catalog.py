@@ -1,5 +1,5 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -87,7 +87,7 @@ class DatasetRecordPreview(BaseModel):
     Level/Status)."""
 
     id: uuid.UUID
-    time: date
+    time: date | None
     location: str | None
     depth_m: float | None
     parameter: str
@@ -126,3 +126,26 @@ class TaxonomyOptions(BaseModel):
     sources: list[str]
     platforms: list[str]
     formats: list[str]
+
+
+class SchemaFilterVariable(BaseModel):
+    """One admin-approved DatasetVariable, as consumed by the dataset-
+    detail page's schema-driven filter rendering (PLAN.md Phase 4)."""
+
+    name: str
+    data_type: str
+    is_dimension: bool
+    roles: list[str]
+    min_value: float | None
+    max_value: float | None
+    distinct_values: list[str] | None
+
+
+class DatasetSchemaFilters(BaseModel):
+    """Returned only for datasets an admin has reviewed (PLAN.md Phase 3) —
+    absence of this (GET /catalog/{id}/schema returning null) is the
+    fallback signal telling the frontend to keep today's fixed-filter
+    rendering for a not-yet-reviewed dataset."""
+
+    reviewed_at: datetime
+    variables: list[SchemaFilterVariable]

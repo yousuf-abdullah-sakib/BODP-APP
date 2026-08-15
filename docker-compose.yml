@@ -114,7 +114,33 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    # -Q celery: the default queue only — every task EXCEPT dataset-file
+    # ingestion (routed to the "ingestion" queue below, see
+    # celery_app.py's task_routes). Keeps lightweight tasks
+    # (notifications/extraction/visualize/admin_stats/reports) from ever
+    # queuing behind a large ingestion job running on the other worker.
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Q celery
+
+  celery-worker-ingestion:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Dedicated worker for large-file ingestion (Phase 2 plan:
+    # "concurrency=1 initially, to avoid concurrent large jobs
+    # compounding memory pressure") — deliberately separate from
+    # celery-worker above so a multi-GB NetCDF/GeoTIFF conversion never
+    # blocks (or gets blocked behind) unrelated lightweight tasks.
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Q ingestion
 
   celery-beat:
     build:

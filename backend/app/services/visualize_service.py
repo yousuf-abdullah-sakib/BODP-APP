@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
 from app.models.admin import SiteSettings
-from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, Station
+from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, DatasetVariable, Station
 from app.models.visualize import VisualizationJob, VizJobStatus
 from app.schemas.visualize import (
     AnnualAnomaly,
@@ -41,6 +41,7 @@ from app.schemas.visualize import (
     TimeSeriesRequest,
     TimeSeriesResponse,
     TimeSeriesStats,
+    VisualizableDatasetSummary,
     VizFilterParams,
 )
 from app.services import settings_service
@@ -65,9 +66,14 @@ def _cache_key(module: str, params: VizFilterParams) -> str:
 
 def _apply_viz_filters(query, f: VizFilterParams):
     """Shared WHERE-clause builder for /visualize/* queries — same idiom as
-    catalog_service._apply_record_filters, but NOT scoped to a single
-    dataset_id (viz filters cut across datasets by parameter/category/
-    station, matching useVizFilters.ts, which has no dataset concept)."""
+    catalog_service._apply_record_filters. dataset_id (PLAN.md Phase 4)
+    scopes to one dataset once the frontend's dataset selector is used;
+    omitting it preserves the original cross-dataset query behavior
+    (parameter/category/station cutting across every dataset) exactly,
+    which is still the correct behavior for any caller that hasn't
+    adopted the selector yet."""
+    if f.dataset_id:
+        query = query.where(DatasetRecord.dataset_id == f.dataset_id)
     if f.category:
         query = query.where(
             DatasetRecord.dataset_id.in_(
@@ -90,6 +96,61 @@ def _apply_viz_filters(query, f: VizFilterParams):
         envelope = func.ST_MakeEnvelope(f.lon_min, f.lat_min, f.lon_max, f.lat_max, 4326)
         query = query.where(func.ST_Intersects(DatasetRecord.geom, envelope))
     return query
+
+
+# --- Dataset scoping (PLAN.md Phase 4) ---
+
+
+async def validate_parameter_for_dataset(
+    db: AsyncSession, dataset_id: uuid.UUID, parameter: str
+) -> None:
+    """Rejects a parameter that isn't an admin-approved Visualization
+    Variable for the given dataset — closes the gap flagged in PLAN.md
+    where any string was previously silently accepted (or silently
+    returned empty data). Only called when the caller actually supplied a
+    dataset_id (see _apply_viz_filters' docstring) — a request with no
+    dataset_id keeps the original unvalidated cross-dataset behavior."""
+    result = await db.execute(
+        select(func.count())
+        .select_from(DatasetVariable)
+        .where(
+            DatasetVariable.dataset_id == dataset_id,
+            DatasetVariable.name == parameter,
+            DatasetVariable.roles.any("visualization_variable"),
+        )
+    )
+    if result.scalar_one() == 0:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{parameter}' is not an approved Visualization Variable for this dataset.",
+        )
+
+
+async def get_visualizable_datasets(db: AsyncSession) -> list[VisualizableDatasetSummary]:
+    """Backs the Visualize module's dataset selector — only datasets an
+    admin has reviewed (Phase 3) with at least one approved Visualization
+    Variable ever appear, since selecting anything else would immediately
+    hit validate_parameter_for_dataset's 422 for every parameter."""
+    result = await db.execute(
+        select(Dataset, DatasetVariable.name)
+        .join(DatasetVariable, DatasetVariable.dataset_id == Dataset.id)
+        .where(
+            Dataset.schema_reviewed_at.is_not(None),
+            DatasetVariable.roles.any("visualization_variable"),
+        )
+        .order_by(Dataset.title, DatasetVariable.name)
+    )
+    rows = result.all()
+
+    by_dataset: dict[uuid.UUID, VisualizableDatasetSummary] = {}
+    for dataset, variable_name in rows:
+        if dataset.id not in by_dataset:
+            by_dataset[dataset.id] = VisualizableDatasetSummary(
+                id=dataset.id, code=dataset.code, title=dataset.title, variables=[]
+            )
+        by_dataset[dataset.id].variables.append(variable_name)
+
+    return list(by_dataset.values())
 
 
 # --- Admin-configurable compute limits ---
@@ -211,6 +272,9 @@ def _resolution_trunc(resolution: str):
 
 
 async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSeriesResponse:
+    if params.dataset_id:
+        await validate_parameter_for_dataset(db, params.dataset_id, params.parameter)
+
     settings_row = await settings_service.get_settings(db)
     _check_date_range_limit(
         settings_row, params, max_days=settings_row.viz_max_date_range_days_timeseries
@@ -372,6 +436,9 @@ async def create_spatial_request(db: AsyncSession, params: SpatialRequest) -> Sp
     """Decides sync-vs-Celery-job the same way extraction_service.create_extraction
     does for extractions — light requests (few points, small grid) compute
     in-process; heavy ones dispatch to Celery (Master Plan §3 Phase 7 task 2)."""
+    if params.dataset_id:
+        await validate_parameter_for_dataset(db, params.dataset_id, params.parameter)
+
     settings_row = await settings_service.get_settings(db)
     # A correctness gate, not a performance heuristic — runs before the
     # sync/async work-unit decision so an oversized request is rejected
@@ -419,6 +486,10 @@ async def get_spatial_job(db: AsyncSession, job_id: uuid.UUID) -> VisualizationJ
 
 
 async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> ComparisonResponse:
+    if params.dataset_id:
+        for parameter in params.parameters:
+            await validate_parameter_for_dataset(db, params.dataset_id, parameter)
+
     settings_row = await settings_service.get_settings(db)
     _check_date_range_limit(
         settings_row, params, max_days=settings_row.viz_max_date_range_days_comparison
@@ -503,6 +574,9 @@ def _linreg_xy(xs: list[float], ys: list[float]) -> tuple[float, float]:
 
 
 async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> StatisticsResponse:
+    if params.dataset_id:
+        await validate_parameter_for_dataset(db, params.dataset_id, params.parameter)
+
     settings_row = await settings_service.get_settings(db)
     _check_date_range_limit(
         settings_row, params, max_days=settings_row.viz_max_date_range_days_statistics

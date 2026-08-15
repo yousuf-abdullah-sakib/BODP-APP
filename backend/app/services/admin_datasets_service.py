@@ -15,8 +15,21 @@ from app.services.audit_service import write_audit_log
 from app.services.storage.registry import get_storage_backend
 
 
-def _generate_code(sequence_hint: int) -> str:
-    return f"BD-{sequence_hint:04d}"
+_AUTO_CODE_PATTERN = r"^BD-\d{4}$"
+
+
+async def _generate_code(db: AsyncSession) -> str:
+    """Next unused BD-XXXX code, derived from the highest existing
+    auto-generated code number (not the total dataset count — deleting a
+    dataset or seeding one with a custom code like BD-MOD-WAVE-2024 would
+    otherwise leave a stale count that collides with an already-used
+    code)."""
+    result = await db.execute(
+        select(Dataset.code).where(Dataset.code.op("~")(_AUTO_CODE_PATTERN))
+    )
+    existing_numbers = [int(code.split("-")[1]) for code in result.scalars().all()]
+    next_number = max(existing_numbers, default=0) + 1
+    return f"BD-{next_number:04d}"
 
 
 async def list_datasets_for_admin(
@@ -60,36 +73,46 @@ async def count_active_grants(db: AsyncSession, dataset_id: uuid.UUID) -> int:
     return result.scalar_one()
 
 
+_MAX_CODE_GENERATION_ATTEMPTS = 5
+
+
 async def create_dataset(
     db: AsyncSession, *, payload: DatasetCreate, actor: User, ip_address: str | None
 ) -> Dataset:
-    code = payload.code
-    if not code:
-        count_result = await db.execute(select(Dataset))
-        existing_count = len(count_result.scalars().all())
-        code = _generate_code(existing_count + 1)
+    explicit_code = payload.code
 
-    dataset = Dataset(
-        code=code,
-        title=payload.title,
-        description=payload.description,
-        category_id=payload.category_id,
-        location=payload.location,
-        source=payload.source,
-        platforms=payload.platforms,
-        parameters=payload.parameters,
-        resolution=payload.resolution,
-        license=payload.license,
-        processing_levels=payload.processing_levels,
-        status=payload.status,
-        created_by=actor.id,
-    )
-    db.add(dataset)
-    try:
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        raise HTTPException(status_code=409, detail="A dataset with this code already exists") from exc
+    for attempt in range(_MAX_CODE_GENERATION_ATTEMPTS):
+        # Only auto-generate a fresh code on retry after a collision — an
+        # explicit user-supplied code is never silently substituted.
+        code = explicit_code or await _generate_code(db)
+
+        dataset = Dataset(
+            code=code,
+            title=payload.title,
+            description=payload.description,
+            category_id=payload.category_id,
+            location=payload.location,
+            source=payload.source,
+            platforms=payload.platforms,
+            parameters=payload.parameters,
+            resolution=payload.resolution,
+            license=payload.license,
+            processing_levels=payload.processing_levels,
+            status=payload.status,
+            created_by=actor.id,
+        )
+        db.add(dataset)
+        try:
+            await db.commit()
+            break
+        except Exception as exc:
+            await db.rollback()
+            # An explicit code, or the last auto-generation attempt,
+            # surfaces as a real 409 rather than retrying forever.
+            if explicit_code or attempt == _MAX_CODE_GENERATION_ATTEMPTS - 1:
+                raise HTTPException(
+                    status_code=409, detail="A dataset with this code already exists"
+                ) from exc
     await db.refresh(dataset)
 
     await write_audit_log(

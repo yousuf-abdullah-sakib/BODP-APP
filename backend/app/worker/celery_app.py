@@ -28,7 +28,34 @@ celery_app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_acks_late=True,
+    # Phase 2: dataset-file ingestion runs on its own queue, consumed by a
+    # dedicated celery-worker-ingestion service (docker-compose.yml) with
+    # concurrency=1 — a large NetCDF/GeoTIFF conversion job never blocks
+    # (or gets blocked behind) lightweight tasks like notifications, and
+    # running only one ingestion job at a time on that worker avoids
+    # concurrent large jobs compounding memory pressure on the same
+    # process. Every other task module stays on the default queue,
+    # consumed by the existing celery-worker service.
+    task_routes={
+        "ingestion.process_dataset_file": {"queue": "ingestion"},
+    },
 )
+
+
+def ingestion_soft_time_limit_seconds(size_bytes: int | None) -> int:
+    """Computes a per-dispatch soft time limit for an ingestion task from
+    the actual file's size, rather than one fixed global timeout that
+    can't fit both a 1MB CSV and a 500GB NetCDF — see
+    Settings.INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS/_PER_GB's docstring in
+    app/core/config.py for the reasoning behind the specific numbers.
+    A soft (not hard) limit: raises a catchable SoftTimeLimitExceeded
+    inside the task rather than forcibly killing the worker process,
+    matching this task's existing pattern of handling every failure mode
+    as a normal exception (see process_dataset_file's except clauses)."""
+    size_gb = (size_bytes or 0) / (1024 * 1024 * 1024)
+    return settings.INGESTION_SOFT_TIME_LIMIT_BASE_SECONDS + round(
+        size_gb * settings.INGESTION_SOFT_TIME_LIMIT_SECONDS_PER_GB
+    )
 
 # Master Plan §3 Phase 4 task 9 — daily scheduled check for grants expiring
 # soon, run by the celery-beat service (docker-compose.yml).

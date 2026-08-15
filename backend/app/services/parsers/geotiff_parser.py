@@ -95,25 +95,51 @@ class GeoTiffParser(FileParser):
 
                 profile = src.profile.copy()
                 profile.update(
-                    driver="COG",
+                    driver="GTiff",
                     compress="DEFLATE",
-                    overview_resampling="average",
+                    tiled=True,
+                    blockxsize=512,
+                    blockysize=512,
                 )
-                # COG driver manages tiling/overviews itself — these
-                # plain-GTiff-specific keys aren't meaningful to it and can
-                # cause a spurious creation-option warning if left in.
-                profile.pop("tiled", None)
-                profile.pop("blockxsize", None)
-                profile.pop("blockysize", None)
 
-                data = src.read()
-
-                with rasterio.open(output_path, "w", **profile) as dst:
-                    dst.write(data)
-                    for i in range(1, src.count + 1):
-                        desc = src.descriptions[i - 1]
+                # Phase 2: windowed/blockwise read-and-write instead of a
+                # single src.read() that materializes every band's full
+                # array in memory at once — the previous approach, and the
+                # one thing that made a large (multi-GB) raster certain to
+                # OOM regardless of how much RAM was provisioned.
+                #
+                # Writing straight to a COG-driver output while streaming
+                # windows isn't supported (the COG driver needs the whole
+                # dataset up front to plan overviews) — so this writes a
+                # tiled, compressed plain GeoTIFF window-by-window first,
+                # then converts that to a real COG via
+                # rasterio.shutil.copy(..., driver="COG"), which itself
+                # streams the conversion rather than holding the full
+                # array. Peak memory is bounded by one window (or one
+                # source block, whichever is larger) at a time, not the
+                # whole raster.
+                tmp_tiled_path = output_dir / "_tiled_intermediate.tif"
+                with rasterio.open(tmp_tiled_path, "w", **profile) as dst:
+                    for band_index in range(1, src.count + 1):
+                        desc = src.descriptions[band_index - 1]
                         if desc:
-                            dst.set_band_description(i, desc)
+                            dst.set_band_description(band_index, desc)
+
+                    for _, window in src.block_windows(1):
+                        for band_index in range(1, src.count + 1):
+                            block = src.read(band_index, window=window)
+                            dst.write(block, band_index, window=window)
+
+            import rasterio.shutil as rio_shutil
+
+            rio_shutil.copy(
+                tmp_tiled_path,
+                output_path,
+                driver="COG",
+                compress="DEFLATE",
+                overview_resampling="average",
+            )
+            tmp_tiled_path.unlink(missing_ok=True)
 
             return ProcessedArtifact(
                 local_path=output_path,

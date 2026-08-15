@@ -24,6 +24,34 @@ def _make_csv_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _make_netcdf_bytes(tmp_path) -> bytes:
+    """ERA5-style NetCDF: real data variables (u10) alongside non-dimensional
+    auxiliary coordinates (number, expver) that xarray's to_dataframe()
+    flattens into ordinary-looking columns but that are NOT scientific
+    variables — used to prove _write_dataset_records only turns genuine
+    data variables into DatasetRecord rows, not every leftover column."""
+    import xarray as xr
+
+    p = tmp_path / "upload_test.nc"
+    times = pd.date_range("2024-01-01", periods=3)
+    lats = np.array([20.5, 21.0])
+    lons = np.array([90.0, 90.5])
+    rng = np.random.default_rng(11)
+    wind = rng.random((3, 2, 2)) * 10
+    ds = xr.Dataset(
+        {"u10": (("valid_time", "lat", "lon"), wind)},
+        coords={
+            "valid_time": times,
+            "lat": lats,
+            "lon": lons,
+            "number": 0,
+            "expver": "0001",
+        },
+    )
+    ds.to_netcdf(p)
+    return p.read_bytes()
+
+
 def _make_mat_bytes(tmp_path) -> bytes:
     p = tmp_path / "upload_test.mat"
     scipy.io.savemat(
@@ -134,6 +162,136 @@ class TestCsvUpload:
             assert "sea_surface_temp" in dataset.parameters
             assert "csv" in dataset.formats
 
+    async def test_upload_populates_dataset_records(self, client, admin_headers):
+        """Regression test: the real ingestion pipeline used to update only
+        dataset.record_count (a summary counter) and never actually insert
+        DatasetRecord rows — meaning catalog filtering silently returned
+        nothing for every real upload despite the dataset card showing a
+        nonzero record count. Verifies the rows genuinely exist now, are
+        attributed to the right dataset/parameter, and satisfy the catalog
+        filter query the same way seeded demo data always has."""
+        import uuid as uuid_module
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetRecord
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("records_test.csv", _make_csv_bytes(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            records = result.scalars().all()
+
+        # 15 source rows x 1 real variable column (sea_surface_temp) — lat/
+        # lon/time are coordinate columns, not turned into their own rows.
+        assert len(records) == 15
+        assert all(rec.parameter == "sea_surface_temp" for rec in records)
+        assert all(rec.value is not None for rec in records)
+        assert all(rec.lat is not None and rec.lon is not None and rec.time is not None for rec in records)
+
+        # Exercise the actual query the catalog's filter/records endpoint
+        # uses (catalog_service.get_filtered_records) directly, rather than
+        # the public HTTP router — the router additionally requires
+        # status='published', which is a separate, unrelated gate this
+        # admin-created test dataset (status='draft') doesn't need to pass
+        # to prove the DatasetRecord population bug itself is fixed.
+        from app.services.catalog_service import RecordsFilter, get_filtered_records
+
+        async with AsyncSessionLocal() as db:
+            _, matching_count, dataset_total_count, _ = await get_filtered_records(
+                db, uuid_module.UUID(dataset_id), RecordsFilter(), preview_limit=6
+            )
+        assert matching_count == 15
+        assert dataset_total_count == 15
+
+    async def test_upload_timeless_csv_still_populates_records(self, client, admin_headers):
+        """Phase 2 regression test: a static spatial grid CSV (lat/lon
+        present, no time column at all — exactly Wave Data's real shape,
+        discovered in Sub-phase A) must now populate real DatasetRecord
+        rows with time=None, instead of the pre-Phase-2 behavior of
+        writing zero rows because time/lat/lon were all required."""
+        import uuid as uuid_module
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetRecord
+
+        df = pd.DataFrame(
+            {
+                "lat": [22.0 + i * 0.05 for i in range(10)],
+                "lon": [91.0 + i * 0.05 for i in range(10)],
+                "wave_height": [1.5 + i * 0.1 for i in range(10)],
+            }
+        )
+        buf = io.BytesIO()
+        df.to_csv(buf, index=False)
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("timeless_grid.csv", buf.getvalue(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            records = result.scalars().all()
+
+        assert len(records) == 10
+        assert all(rec.parameter == "wave_height" for rec in records)
+        assert all(rec.time is None for rec in records)
+        assert all(rec.lat is not None and rec.lon is not None for rec in records)
+
+    async def test_upload_non_spatial_time_series_still_populates_records(self, client, admin_headers):
+        """Mirror case: a time series with no lat/lon at all (e.g. a single
+        buoy's own time-indexed readings with location implicit) must also
+        populate real rows with lat/lon=None, not be skipped."""
+        import uuid as uuid_module
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetRecord
+
+        df = pd.DataFrame(
+            {
+                "time": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "air_pressure": [1010.0 + i for i in range(5)],
+            }
+        )
+        buf = io.BytesIO()
+        df.to_csv(buf, index=False)
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("time_only.csv", buf.getvalue(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            records = result.scalars().all()
+
+        assert len(records) == 5
+        assert all(rec.parameter == "air_pressure" for rec in records)
+        assert all(rec.time is not None for rec in records)
+        assert all(rec.lat is None and rec.lon is None for rec in records)
+        assert all(rec.geom is None for rec in records)
+
     async def test_upload_propagates_spatial_extent_to_dataset(self, client, admin_headers):
         """dataset_files.spatial_extent is per-file; Phase 3's catalog detail
         endpoint reads datasets.spatial_extent, so ingestion must union each
@@ -240,6 +398,43 @@ class TestCsvUpload:
         assert r.status_code == 401
 
 
+class TestNetcdfUpload:
+    async def test_upload_netcdf_records_exclude_auxiliary_coordinates(
+        self, client, admin_headers, tmp_path
+    ):
+        """Regression test: an earlier version of _write_dataset_records
+        treated every non-lat/lon/time Parquet column as a real variable,
+        which meant xarray's to_dataframe() flattening non-dimensional
+        auxiliary coordinates (e.g. ERA5's "number"/"expver") in produced
+        DatasetRecord rows for those too — polluting real data with
+        meaningless bookkeeping values. Only genuine data variables
+        (metadata.variables, i.e. ds.data_vars) may become parameter rows."""
+        import uuid as uuid_module
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetRecord
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("aux_coords.nc", _make_netcdf_bytes(tmp_path), "application/x-netcdf")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+        assert r.json()["dataset_file"]["file_metadata"]["variables"] == ["u10"]
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            records = result.scalars().all()
+
+        # 3 time steps x 2 lat x 2 lon = 12 rows for the one real variable.
+        assert len(records) == 12
+        assert {rec.parameter for rec in records} == {"u10"}
+
+
 class TestMatUpload:
     async def test_upload_mat_succeeds(self, client, admin_headers, tmp_path):
         dataset_id = await _create_dataset(client, admin_headers)
@@ -278,7 +473,33 @@ class TestGeoTiffUpload:
         assert body["file_metadata"]["shape"] == "raster"
         assert body["file_metadata"]["bands"] == ["sea_surface_temp"]
         assert body["file_metadata"]["pixel_width"] == 300
-        assert body["file_metadata"]["pixel_height"] == 200
+
+    async def test_geotiff_upload_never_creates_dataset_records(self, client, admin_headers, tmp_path):
+        """Explicit negative test: raster files must NOT create one
+        DatasetRecord per pixel (the test fixture is 300x200 = 60,000
+        pixels — if the raster-skip check in _write_dataset_records ever
+        regressed, this would immediately produce 60,000 rows for a single
+        small test file). Raster data is meant to be queried through its
+        COG in processed/, never as per-pixel rows."""
+        import uuid as uuid_module
+
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetRecord
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("no_records.tif", _make_geotiff_bytes(tmp_path), "image/tiff")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            assert result.scalars().all() == []
 
     async def test_rejects_geotiff_without_crs(self, client, admin_headers, tmp_path):
         p = tmp_path / "no_crs.tif"
@@ -325,6 +546,43 @@ class TestUploadValidation:
             f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
         )
         assert r.status_code == 400
+
+    async def test_admin_configured_size_limit_is_enforced(self, client, admin_headers):
+        """Regression test: the upload endpoint used to always fall back to
+        the hardcoded MAX_UPLOAD_SIZE_MB env default, silently ignoring
+        site_settings.max_upload_size_mb even though it's admin-editable via
+        Settings. Proves the DB-configured value is now actually read and
+        enforced, not just displayed in the settings form."""
+        r = await client.patch(
+            "/api/v1/admin/settings/general",
+            json={"max_upload_size_mb": 1},
+            headers=admin_headers,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["max_upload_size_mb"] == 1
+
+        try:
+            dataset_id = await _create_dataset(client, admin_headers)
+            # 2MB of payload — comfortably over the 1MB limit just configured,
+            # comfortably under the original 5000MB hardcoded default (which
+            # would have wrongly accepted this file before the fix).
+            oversized_csv = b"time,lat,lon,value\n" + (b"2024-01-01,22.0,91.0,27.0\n" * 100_000)
+            assert len(oversized_csv) > 1 * 1024 * 1024
+
+            files = {"file": ("oversized.csv", oversized_csv, "text/csv")}
+            r = await client.post(
+                f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+            )
+            assert r.status_code == 400, r.text
+            assert "exceeds the 1MB upload limit" in r.json()["error"]["message"]
+        finally:
+            # Restore the default so this test can't leak state into others.
+            r = await client.patch(
+                "/api/v1/admin/settings/general",
+                json={"max_upload_size_mb": 5000},
+                headers=admin_headers,
+            )
+            assert r.status_code == 200, r.text
 
 
 class TestUploadListing:

@@ -65,6 +65,85 @@ class TestDatasetCrud:
         assert r.json()["location"] == "Bay of Bengal"
 
 
+class TestAutoCodeGeneration:
+    """Regression coverage for a real production bug: auto-generated codes
+    were derived from the total dataset COUNT rather than the highest
+    existing BD-XXXX number, so deleting a dataset (or a gap from a
+    custom-coded seed dataset) could make the next auto-generated code
+    collide with one still in use, surfacing as a false "code already
+    exists" 409 on a brand new dataset with no code specified at all."""
+
+    async def test_deleting_a_dataset_does_not_collide_with_a_survivor(self, client):
+        """The real production bug reproduced directly: with BD-0001 and
+        BD-0002 both present, deleting BD-0001 drops the total dataset
+        COUNT to 1 — a count-based generator computes count+1 = BD-0002,
+        directly colliding with the still-alive BD-0002 and surfacing as
+        a false 409 on a brand new dataset that never specified a code at
+        all. The real max-based generator must skip past BD-0002 instead."""
+        headers = await _admin_headers(
+            client, permissions=["Edit Datasets", "Delete Datasets"]
+        )
+        first_id = await _create_dataset(client, headers, title="First Auto-Coded")
+        second_id = await _create_dataset(client, headers, title="Second Auto-Coded")
+        second_code = (
+            await client.get(f"/api/v1/admin/datasets/{second_id}", headers=headers)
+        ).json()["code"]
+        assert second_code == "BD-0002"
+
+        r = await client.request(
+            "DELETE",
+            f"/api/v1/admin/datasets/{first_id}",
+            json={"confirm": True},
+            headers=headers,
+        )
+        assert r.status_code == 204, r.text
+
+        third_id = await _create_dataset(client, headers, title="Third Auto-Coded")
+        r = await client.get(f"/api/v1/admin/datasets/{third_id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["code"] == "BD-0003"  # not BD-0002 — no collision, no false 409
+
+    async def test_custom_coded_dataset_does_not_collide_with_next_auto_code(self, client):
+        headers = await _admin_headers(
+            client, permissions=["Edit Datasets", "Delete Datasets"]
+        )
+        # Seed enough auto-coded datasets that the next auto-generated
+        # code would be BD-0003, then create a dataset with an explicit
+        # non-BD-XXXX-shaped code (mirrors real seeded datasets like
+        # BD-MOD-WAVE-2024) — it must never affect subsequent auto-code
+        # generation, and a further auto-coded create must still succeed.
+        await _create_dataset(client, headers, title="Auto One")
+        await _create_dataset(client, headers, title="Auto Two")
+
+        r = await client.post(
+            "/api/v1/admin/datasets",
+            json={"title": "Custom Coded", "code": "BD-CUSTOM-2024"},
+            headers=headers,
+        )
+        assert r.status_code == 201, r.text
+
+        r = await client.post(
+            "/api/v1/admin/datasets", json={"title": "Auto Three"}, headers=headers
+        )
+        assert r.status_code == 201, r.text
+
+    async def test_duplicate_explicit_code_still_returns_409(self, client):
+        headers = await _admin_headers(client, permissions=["Edit Datasets"])
+        r = await client.post(
+            "/api/v1/admin/datasets",
+            json={"title": "Original", "code": "BD-DUPETEST"},
+            headers=headers,
+        )
+        assert r.status_code == 201, r.text
+
+        r = await client.post(
+            "/api/v1/admin/datasets",
+            json={"title": "Duplicate", "code": "BD-DUPETEST"},
+            headers=headers,
+        )
+        assert r.status_code == 409, r.text
+
+
 class TestPublishToggle:
     async def test_publish_and_unpublish(self, client):
         headers = await _admin_headers(client, permissions=["Edit Datasets", "Publish Content"])

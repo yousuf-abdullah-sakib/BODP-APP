@@ -39,8 +39,21 @@ async def _has_open_issue(db: AsyncSession, dataset_id: uuid.UUID, issue_type: s
 
 
 async def _detect_duplicates(db: AsyncSession) -> list[QualityIssue]:
+    # Phase 2: time/station_id are both nullable (not every dataset has a
+    # time dimension or station attribution). Postgres GROUP BY treats
+    # NULL = NULL as equal, so without this filter every timeless,
+    # station-less row of the same parameter in a dataset would collapse
+    # into one group and falsely flag as "duplicates" the moment there are
+    # 2+ such rows — which is normal for e.g. a static spatial grid where
+    # lat/lon (not time/station) is what actually distinguishes rows.
+    # Excluding rows with neither dimension set means this check only ever
+    # runs against records where (time, station_id) genuinely identifies
+    # a real observation slot, matching what it was designed to catch.
     result = await db.execute(
         select(DatasetRecord.dataset_id, func.count())
+        .where(
+            (DatasetRecord.time.is_not(None)) | (DatasetRecord.station_id.is_not(None))
+        )
         .group_by(
             DatasetRecord.dataset_id,
             DatasetRecord.time,

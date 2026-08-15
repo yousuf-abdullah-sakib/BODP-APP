@@ -68,7 +68,29 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
     activeCount,
     stationOptions,
     loading,
+    schema,
   } = useDatasetFilters(dataset);
+
+  // Schema-driven filter rendering (PLAN.md Phase 4) — schema is null for
+  // any dataset an admin hasn't reviewed yet (Phase 3), which keeps every
+  // section below exactly as it always rendered (the fallback). Once
+  // reviewed, gating keys off each variable's ADMIN-APPROVED roles
+  // (v.roles), never Phase 2's raw is_dimension detection flag — an admin
+  // can approve a Phase-2-detected dimension (e.g. time) as a
+  // data_variable instead, and that must NOT render a Time Range filter;
+  // only an explicit "dimension" role does.
+  const approvedNonDimensionNames = schema
+    ? schema.variables.filter((v) => !v.roles.includes("dimension") && v.roles.length > 0).map((v) => v.name)
+    : null;
+  const hasApprovedTimeDimension = schema
+    ? schema.variables.some((v) => v.roles.includes("dimension") && v.data_type === "temporal")
+    : true;
+  const hasApprovedSpatialDimension = schema
+    ? schema.variables.some((v) => v.roles.includes("dimension") && (v.name === "lat" || v.name === "lon"))
+    : true;
+  const hasApprovedDepthDimension = schema
+    ? schema.variables.some((v) => v.roles.includes("dimension") && v.name === "depth")
+    : true;
 
   useEffect(() => {
     if (!user) return;
@@ -141,82 +163,88 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
             </button>
           </div>
 
-          <FilterSection title="Geographic Bounding Box" icon="🗺️">
-            <div className="map-filter-box">
-              <div className="map-filter-head">
-                <span>Draw a box on the map</span>
-                <button className="btn-clear-spatial" onClick={clearSpatial}>
-                  Clear
-                </button>
+          {hasApprovedSpatialDimension && (
+            <FilterSection title="Geographic Bounding Box" icon="🗺️">
+              <div className="map-filter-box">
+                <div className="map-filter-head">
+                  <span>Draw a box on the map</span>
+                  <button className="btn-clear-spatial" onClick={clearSpatial}>
+                    Clear
+                  </button>
+                </div>
+                <SpatialFilterMap
+                  onAoiChange={(aoi) => update("bounds", aoi ? boundsOf(aoi) : null)}
+                  clearSignal={clearSignal}
+                  stations={stationOptions}
+                />
+                <div className="map-filter-info">
+                  {filters.bounds ? (
+                    <>
+                      <b>Selected:</b> Lat {formatCoordinate(filters.bounds.latMin, "lat", coordFormat)}–
+                      {formatCoordinate(filters.bounds.latMax, "lat", coordFormat)}, Lon{" "}
+                      {formatCoordinate(filters.bounds.lonMin, "lon", coordFormat)}–
+                      {formatCoordinate(filters.bounds.lonMax, "lon", coordFormat)}
+                    </>
+                  ) : (
+                    "No area selected — showing all locations"
+                  )}
+                </div>
               </div>
-              <SpatialFilterMap
-                onAoiChange={(aoi) => update("bounds", aoi ? boundsOf(aoi) : null)}
-                clearSignal={clearSignal}
-                stations={stationOptions}
-              />
-              <div className="map-filter-info">
-                {filters.bounds ? (
-                  <>
-                    <b>Selected:</b> Lat {formatCoordinate(filters.bounds.latMin, "lat", coordFormat)}–
-                    {formatCoordinate(filters.bounds.latMax, "lat", coordFormat)}, Lon{" "}
-                    {formatCoordinate(filters.bounds.lonMin, "lon", coordFormat)}–
-                    {formatCoordinate(filters.bounds.lonMax, "lon", coordFormat)}
-                  </>
-                ) : (
-                  "No area selected — showing all locations"
-                )}
+              <div className="filter-group" style={{ marginTop: "0.8rem" }}>
+                <span className="filter-label">Latitude Range (°)</span>
+                <div className="date-row">
+                  <input className="filter-input" type="number" placeholder="Min" value={filters.latMin} onChange={(e) => update("latMin", e.target.value)} />
+                  <input className="filter-input" type="number" placeholder="Max" value={filters.latMax} onChange={(e) => update("latMax", e.target.value)} />
+                </div>
               </div>
-            </div>
-            <div className="filter-group" style={{ marginTop: "0.8rem" }}>
-              <span className="filter-label">Latitude Range (°)</span>
-              <div className="date-row">
-                <input className="filter-input" type="number" placeholder="Min" value={filters.latMin} onChange={(e) => update("latMin", e.target.value)} />
-                <input className="filter-input" type="number" placeholder="Max" value={filters.latMax} onChange={(e) => update("latMax", e.target.value)} />
+              <div className="filter-group">
+                <span className="filter-label">Longitude Range (°)</span>
+                <div className="date-row">
+                  <input className="filter-input" type="number" placeholder="Min" value={filters.lonMin} onChange={(e) => update("lonMin", e.target.value)} />
+                  <input className="filter-input" type="number" placeholder="Max" value={filters.lonMax} onChange={(e) => update("lonMax", e.target.value)} />
+                </div>
               </div>
-            </div>
-            <div className="filter-group">
-              <span className="filter-label">Longitude Range (°)</span>
-              <div className="date-row">
-                <input className="filter-input" type="number" placeholder="Min" value={filters.lonMin} onChange={(e) => update("lonMin", e.target.value)} />
-                <input className="filter-input" type="number" placeholder="Max" value={filters.lonMax} onChange={(e) => update("lonMax", e.target.value)} />
+              {hasApprovedDepthDimension && (
+                <div className="filter-group">
+                  <span className="filter-label">Depth / Elevation (m)</span>
+                  <div className="date-row">
+                    <input className="filter-input" type="number" placeholder="Min" value={filters.depthMin} onChange={(e) => update("depthMin", e.target.value)} />
+                    <input className="filter-input" type="number" placeholder="Max" value={filters.depthMax} onChange={(e) => update("depthMax", e.target.value)} />
+                  </div>
+                </div>
+              )}
+              <div className="filter-group">
+                <span className="filter-label">Station</span>
+                <select className="filter-select" value={filters.station} onChange={(e) => update("station", e.target.value)}>
+                  <option value="">All Stations</option>
+                  {stationOptions.map((s) => (
+                    <option key={s.code} value={s.code}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
               </div>
-            </div>
-            <div className="filter-group">
-              <span className="filter-label">Depth / Elevation (m)</span>
-              <div className="date-row">
-                <input className="filter-input" type="number" placeholder="Min" value={filters.depthMin} onChange={(e) => update("depthMin", e.target.value)} />
-                <input className="filter-input" type="number" placeholder="Max" value={filters.depthMax} onChange={(e) => update("depthMax", e.target.value)} />
-              </div>
-            </div>
-            <div className="filter-group">
-              <span className="filter-label">Station</span>
-              <select className="filter-select" value={filters.station} onChange={(e) => update("station", e.target.value)}>
-                <option value="">All Stations</option>
-                {stationOptions.map((s) => (
-                  <option key={s.code} value={s.code}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </FilterSection>
+            </FilterSection>
+          )}
 
-          <FilterSection title="Time Range" icon="📅">
-            <div className="filter-group">
-              <span className="filter-label">Date From – To</span>
-              <div className="date-row">
-                <input className="filter-input" type="date" value={filters.dateFrom} onChange={(e) => update("dateFrom", e.target.value)} />
-                <input className="filter-input" type="date" value={filters.dateTo} onChange={(e) => update("dateTo", e.target.value)} />
+          {hasApprovedTimeDimension && (
+            <FilterSection title="Time Range" icon="📅">
+              <div className="filter-group">
+                <span className="filter-label">Date From – To</span>
+                <div className="date-row">
+                  <input className="filter-input" type="date" value={filters.dateFrom} onChange={(e) => update("dateFrom", e.target.value)} />
+                  <input className="filter-input" type="date" value={filters.dateTo} onChange={(e) => update("dateTo", e.target.value)} />
+                </div>
               </div>
-            </div>
-          </FilterSection>
+            </FilterSection>
+          )}
 
           <FilterSection title="Variable & Quality" icon="📐">
             <div className="filter-group">
               <span className="filter-label">Parameter / Variable</span>
               <select className="filter-select" value={filters.parameter} onChange={(e) => update("parameter", e.target.value)}>
                 <option value="">All Parameters</option>
-                {dataset.parameters.map((p) => (
+                {(approvedNonDimensionNames ?? dataset.parameters).map((p) => (
                   <option key={p} value={p}>
                     {p}
                   </option>
@@ -348,7 +376,9 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
                     <tbody>
                       {preview.map((r) => (
                         <tr key={r.id}>
-                          <td style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>{formatDate(r.time, dateFormat)}</td>
+                          <td style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>
+                            {r.time ? formatDate(r.time, dateFormat) : "—"}
+                          </td>
                           <td style={{ fontSize: "0.82rem" }}>{r.location}</td>
                           <td style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{r.depth_m ?? "—"}</td>
                           <td style={{ fontWeight: 500 }}>{r.parameter}</td>

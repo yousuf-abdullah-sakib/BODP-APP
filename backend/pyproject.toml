@@ -36,6 +36,8 @@ dependencies = [
     "numpy>=2.0.0",
     "h5py>=3.12.1",
     "rasterio>=1.4.3",
+    "dask[array]>=2024.10.0",
+    "zarr>=2.18.0,<3.0.0",
     "python-magic-bin>=0.4.14; platform_system=='Windows'",
     "python-magic>=0.4.27; platform_system!='Windows'",
     "nh3>=0.2.18",
@@ -61,3 +63,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 asyncio_default_test_loop_scope = "session"
 testpaths = ["tests"]
+markers = [
+    "slow: generates genuinely large fixtures and/or runs a real memory-constrained subprocess (Phase 2 memory-ceiling tests) — excluded from the default run via `-m \"not slow\"`; run explicitly with `pytest -m slow` when verifying large-file/chunking changes.",
+]

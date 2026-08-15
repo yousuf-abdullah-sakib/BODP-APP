@@ -13,6 +13,7 @@ from app.schemas.catalog import (
     CatalogSearchResponse,
     DatasetDetail,
     DatasetRecordsResponse,
+    DatasetSchemaFilters,
     DatasetSort,
     DatasetSummary,
     QualityBreakdown,
@@ -22,6 +23,7 @@ from app.schemas.catalog import (
 )
 from app.services.catalog_service import (
     RecordsFilter,
+    get_dataset_schema_for_filters,
     get_filtered_records,
     get_published_dataset,
     get_station_options_for_dataset,
@@ -146,6 +148,18 @@ async def catalog_dataset_detail(
         temporal_end=dataset.temporal_end,
         spatial_bbox=spatial_bbox,
     )
+
+
+@router.get("/{dataset_id}/schema", response_model=DatasetSchemaFilters | None)
+async def catalog_dataset_schema(dataset_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Admin-approved variable schema for schema-driven filter rendering
+    (PLAN.md Phase 4) — null for a dataset not yet reviewed (Phase 3),
+    which is the frontend's signal to fall back to today's fixed
+    dataset.parameters-driven filters rather than a hard cutover."""
+    dataset = await get_published_dataset(db, dataset_id)
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return await get_dataset_schema_for_filters(db, dataset_id)
 
 
 @router.get("/{dataset_id}/stations", response_model=list[StationOption])

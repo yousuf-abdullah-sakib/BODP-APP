@@ -1,6 +1,7 @@
 // Mirrors backend/app/schemas/visualize.py.
 
 export interface VizFilterParams {
+  dataset_id?: string | null;
   category?: string | null;
   station?: string | null;
   date_from?: string | null;
@@ -190,6 +191,13 @@ export interface VizComputeLimits {
   viz_max_date_range_days_timeseries: number | null;
   viz_max_date_range_days_comparison: number | null;
   viz_max_date_range_days_statistics: number | null;
+}
+
+export interface VisualizableDatasetSummary {
+  id: string;
+  code: string;
+  title: string;
+  variables: string[];
 }
 
 export interface BoundaryShapefileSummary {
