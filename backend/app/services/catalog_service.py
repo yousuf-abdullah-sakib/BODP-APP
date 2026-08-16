@@ -358,6 +358,29 @@ def _apply_record_filters(query, dataset_id: uuid.UUID, f: RecordsFilter):
     return query
 
 
+async def get_matching_record_counts(
+    db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter
+) -> tuple[int, int]:
+    """Returns (matching_count, dataset_total_count) only — no preview rows
+    or quality breakdown — for callers that just need the coverage numbers
+    (e.g. the admin request queue's "X% of dataset" figure) without the
+    cost of a full get_filtered_records call per request."""
+    base_query = select(DatasetRecord)
+    if f.station:
+        base_query = base_query.join(Station, Station.id == DatasetRecord.station_id)
+    filtered_query = _apply_record_filters(base_query, dataset_id, f)
+
+    count_query = select(func.count()).select_from(filtered_query.subquery())
+    matching_count = (await db.execute(count_query)).scalar_one()
+
+    total_query = select(func.count()).select_from(
+        select(DatasetRecord).where(DatasetRecord.dataset_id == dataset_id).subquery()
+    )
+    dataset_total_count = (await db.execute(total_query)).scalar_one()
+
+    return matching_count, dataset_total_count
+
+
 async def get_filtered_records(
     db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter, *, preview_limit: int
 ) -> tuple[list[DatasetRecord], int, int, dict[str, int]]:

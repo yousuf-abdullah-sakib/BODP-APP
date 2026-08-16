@@ -11,7 +11,6 @@ from app.schemas.requests import (
     ApproveRequestBody,
     ExtendGrantBody,
     GrantDetail,
-    ModifyRequestBody,
     RejectRequestBody,
     RequestDetail,
 )
@@ -23,36 +22,18 @@ router = APIRouter(prefix="/admin", tags=["admin-requests"])
 _APPROVE_PERMISSION = "Approve Requests"
 
 
+def _to_request_detail(request, coverage: dict) -> RequestDetail:
+    return RequestDetail.model_validate(request).model_copy(update=coverage)
+
+
 @router.get("/requests", response_model=list[RequestDetail])
 async def list_requests(
     status: str | None = None,
     current_user: User = Depends(require_permission(_APPROVE_PERMISSION)),
     db: AsyncSession = Depends(get_db),
 ):
-    return await requests_service.list_requests_for_admin(db, status_filter=status)
-
-
-@router.patch("/requests/{request_id}/modify", response_model=RequestDetail)
-async def modify_request(
-    request_id: uuid.UUID,
-    body: ModifyRequestBody,
-    request: Request,
-    current_user: User = Depends(require_permission(_APPROVE_PERMISSION)),
-    db: AsyncSession = Depends(get_db),
-):
-    """Save Changes — persists an admin's edited filter configuration
-    without approving or rejecting. Reuses the same "Approve Requests"
-    permission as approve/reject, since reviewing/modifying a request's
-    scope is part of the same review capability, not a separate one."""
-    dataset_request = await requests_service.get_request_for_admin(db, request_id)
-    modified = await requests_service.modify_request(
-        db,
-        request=dataset_request,
-        admin=current_user,
-        search_criteria=body.search_criteria,
-        ip_address=get_client_ip(request),
-    )
-    return modified
+    pairs = await requests_service.list_requests_for_admin(db, status_filter=status)
+    return [_to_request_detail(r, coverage) for r, coverage in pairs]
 
 
 @router.post("/requests/{request_id}/approve", response_model=GrantDetail)
@@ -95,7 +76,8 @@ async def reject_request(
         ip_address=get_client_ip(request),
     )
     send_request_rejected.delay(str(rejected.id))
-    return rejected
+    coverage = await requests_service.get_request_coverage(db, rejected)
+    return _to_request_detail(rejected, coverage)
 
 
 @router.get("/grants", response_model=list[GrantDetail])

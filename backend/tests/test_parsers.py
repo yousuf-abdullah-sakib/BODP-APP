@@ -393,6 +393,322 @@ class TestMatParser:
             sniff_format(bad, "mat")
 
 
+def _save_gridded_struct_mat(
+    path,
+    *,
+    x,
+    y,
+    val,
+    time=None,
+    field_names: dict[str, str] | None = None,
+    name: str | None = "TestVariable",
+    units: str | None = "unit",
+    struct_var_name: str = "data",
+    val_dim_order: tuple[str, ...] = ("time", "y", "x"),
+):
+    """Builds a synthetic legacy .mat file containing a 1x1 struct shaped
+    like a real gridded model export (see january instantanteneous.mat) —
+    configurable field names and value-array dimension order so the same
+    helper covers every variation the gridded-struct detector must
+    handle. val_dim_order describes what order `val`'s axes are ALREADY
+    in (a permutation of "time"/"y"/"x", or just "y"/"x" for a snapshot)
+    — the array is transposed here to match, mirroring how a real export
+    might store dimensions in any order."""
+    names = field_names or {}
+    x_name = names.get("x", "X")
+    y_name = names.get("y", "Y")
+    val_name = names.get("val", "Val")
+    time_name = names.get("time", "Time")
+    name_field = names.get("name", "Name")
+    units_field = names.get("units", "Units")
+
+    axes = {"time": 0, "y": 1, "x": 2} if time is not None else {"y": 0, "x": 1}
+    source_order = tuple(axes[d] for d in val_dim_order if d in axes)
+    val_reordered = np.transpose(val, np.argsort(source_order))
+
+    dtype_fields = [(x_name, "O"), (y_name, "O"), (val_name, "O")]
+    if time is not None:
+        dtype_fields.append((time_name, "O"))
+    if name is not None:
+        dtype_fields.append((name_field, "O"))
+    if units is not None:
+        dtype_fields.append((units_field, "O"))
+
+    struct = np.zeros((1, 1), dtype=dtype_fields)
+    struct[0, 0][x_name] = x
+    struct[0, 0][y_name] = y
+    struct[0, 0][val_name] = val_reordered
+    if time is not None:
+        struct[0, 0][time_name] = time.reshape(-1, 1)
+    if name is not None:
+        struct[0, 0][name_field] = np.array([name])
+    if units is not None:
+        struct[0, 0][units_field] = np.array([units])
+
+    scipy.io.savemat(path, {struct_var_name: struct})
+    return path
+
+
+class TestMatGriddedStructParser:
+    """Generic gridded MATLAB struct support (X/Y grid + N-D value array +
+    optional time) — additive to the flat/tabular .mat path above, which
+    must remain completely unaffected (see the flat-fallback regression
+    test at the bottom of this class)."""
+
+    @pytest.fixture
+    def geographic_grid(self):
+        lon_1d = np.linspace(90.0, 91.0, 6)
+        lat_1d = np.linspace(20.0, 21.0, 5)
+        x, y = np.meshgrid(lon_1d, lat_1d)  # x varies by column, y by row
+        return x, y
+
+    def test_parses_geographic_gridded_struct_with_time(self, geographic_grid, tmp_path):
+        x, y = geographic_grid
+        ny, nx = x.shape
+        nt = 4
+        rng = np.random.default_rng(1)
+        val = rng.random((nt, ny, nx))
+        time = 739618.0 + np.arange(nt) * 0.5
+
+        p = tmp_path / "geo_gridded.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=time)
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+
+        assert meta.variables == ["TestVariable"]
+        assert meta.dimensions == {"y": ny, "x": nx, "time": nt}
+        assert meta.spatial_lon_min == pytest.approx(x.min())
+        assert meta.spatial_lon_max == pytest.approx(x.max())
+        assert meta.spatial_lat_min == pytest.approx(y.min())
+        assert meta.spatial_lat_max == pytest.approx(y.max())
+        assert meta.extra["source_crs"] is None  # already geographic, no conversion
+        assert meta.extra["crs_assumed"] is False
+        assert meta.extra["has_time_dim"] is True
+        assert meta.extra["units"] == "unit"
+
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.row_count == nt * ny * nx
+        df = pd.read_parquet(artifact.local_path)
+        assert set(df.columns) == {"time", "lat", "lon", "TestVariable"}
+        assert len(df) == nt * ny * nx
+        # Geographic coordinates pass through unconverted.
+        assert df["lon"].min() == pytest.approx(x.min())
+        assert df["lat"].max() == pytest.approx(y.max())
+
+    def test_parses_projected_gridded_struct_uses_default_crs(self, tmp_path):
+        # UTM-46N-scale values (meters, not degrees) — no embedded CRS in
+        # the struct, so the configured DEFAULT_PROJECTED_CRS applies and
+        # crs_assumed must be True.
+        x_1d = np.linspace(126768.0, 150976.0, 6)
+        y_1d = np.linspace(2407270.0, 2467410.0, 5)
+        x, y = np.meshgrid(x_1d, y_1d)
+        ny, nx = x.shape
+        val = np.zeros((ny, nx))  # single snapshot, no time
+
+        p = tmp_path / "projected_gridded.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=None)
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+
+        assert meta.extra["source_crs"] == "EPSG:32646"
+        assert meta.extra["crs_assumed"] is True
+        assert meta.extra["has_time_dim"] is False
+        assert meta.extra["time_col"] is None
+        # Converted to real Bangladesh-coastal lon/lat, not raw UTM meters.
+        assert -180.0 <= meta.spatial_lon_min <= 180.0
+        assert -90.0 <= meta.spatial_lat_min <= 90.0
+        assert meta.spatial_lon_min == pytest.approx(89.39, abs=0.1)
+        assert meta.spatial_lat_min == pytest.approx(21.7, abs=0.1)
+
+    def test_alternate_field_names_are_detected(self, geographic_grid, tmp_path):
+        """Field-name aliases (lon/lat instead of X/Y, value/time
+        lowercase) must be detected the same way — detection is
+        shape/dtype driven with names only as a secondary hint, never a
+        hard requirement of the literal "X"/"Y"/"Val" spelling."""
+        x, y = geographic_grid
+        ny, nx = x.shape
+        val = np.random.default_rng(2).random((ny, nx))
+
+        p = tmp_path / "alt_names.mat"
+        _save_gridded_struct_mat(
+            p,
+            x=x,
+            y=y,
+            val=val,
+            time=None,
+            field_names={"x": "lon", "y": "lat", "val": "value"},
+            name="Wind",
+            units="m/s",
+        )
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        assert meta.variables == ["Wind"]
+        assert meta.extra["units"] == "m/s"
+
+    def test_dimension_order_yxt_is_detected(self, geographic_grid, tmp_path):
+        """The value array's on-disk axis order need not be time-first —
+        (y, x, time) must resolve to the same tidy output as (time, y, x)."""
+        x, y = geographic_grid
+        ny, nx = x.shape
+        nt = 3
+        rng = np.random.default_rng(3)
+        val = rng.random((nt, ny, nx))
+
+        p = tmp_path / "yxt_order.mat"
+        _save_gridded_struct_mat(
+            p, x=x, y=y, val=val, time=739618.0 + np.arange(nt), val_dim_order=("y", "x", "time")
+        )
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        assert meta.dimensions == {"y": ny, "x": nx, "time": nt}
+
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.row_count == nt * ny * nx
+
+    def test_no_time_field_treated_as_single_snapshot(self, geographic_grid, tmp_path):
+        x, y = geographic_grid
+        ny, nx = x.shape
+        val = np.random.default_rng(4).random((ny, nx))
+
+        p = tmp_path / "snapshot.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=None)
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        assert meta.extra["has_time_dim"] is False
+        assert meta.extra["time_col"] is None
+        assert meta.temporal_start is None
+        assert meta.temporal_end is None
+        assert meta.dimensions == {"y": ny, "x": nx}
+
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.row_count == ny * nx
+        df = pd.read_parquet(artifact.local_path)
+        assert "time" not in df.columns
+
+    def test_no_name_field_falls_back_to_struct_variable_name(self, geographic_grid, tmp_path):
+        x, y = geographic_grid
+        ny, nx = x.shape
+        val = np.random.default_rng(5).random((ny, nx))
+
+        p = tmp_path / "no_name_field.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=None, name=None, units=None)
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        assert meta.variables == ["data"]  # falls back to the struct's own variable name
+        assert meta.extra["variable_name_inferred"] is True
+        assert meta.extra["units"] is None
+
+    def test_square_grid_uses_identity_axis_order_not_ambiguous(self, tmp_path):
+        """A square spatial grid (ny == nx) must NOT be treated as
+        unresolvable ambiguity — see mat_gridded_struct._match_value_dims
+        for why identity/no-transpose is the physically correct default
+        here, verified against the real january instantanteneous.mat
+        reference file's own meshgrid convention."""
+        lon_1d = np.linspace(90.0, 91.0, 5)
+        lat_1d = np.linspace(20.0, 21.0, 5)  # same length as lon -> ny == nx
+        x, y = np.meshgrid(lon_1d, lat_1d)
+        ny, nx = x.shape
+        assert ny == nx
+        nt = 3
+        rng = np.random.default_rng(6)
+        val = rng.random((nt, ny, nx))
+
+        p = tmp_path / "square_grid.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=739618.0 + np.arange(nt))
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)  # must NOT fall back to flat/tabular parsing
+        assert meta.variables == ["TestVariable"]
+        assert meta.dimensions == {"y": ny, "x": nx, "time": nt}
+
+    def test_cell_centered_value_grid_one_less_than_coord_grid(self, tmp_path):
+        """Reproduces january instantanteneous.mat's actual shape: X/Y are
+        181x181 node-corner coordinates, Val is 372x180x180 (one less per
+        spatial axis) — the standard finite-volume cell-center
+        convention. Detection must average corners down rather than
+        rejecting the shape mismatch as unmatched."""
+        lon_1d = np.linspace(89.4, 89.6, 6)
+        lat_1d = np.linspace(21.7, 22.3, 6)
+        x, y = np.meshgrid(lon_1d, lat_1d)  # 6x6 node grid
+        nt = 3
+        rng = np.random.default_rng(7)
+        val = rng.random((nt, 5, 5))  # 5x5 cell-center grid (one less each way)
+
+        p = tmp_path / "cell_centered.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=739618.0 + np.arange(nt))
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        assert meta.dimensions == {"y": 5, "x": 5, "time": nt}
+
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.row_count == nt * 5 * 5
+
+    def test_ambiguous_shape_falls_back_to_flat_tabular_parser(self, tmp_path):
+        """When time length equals both spatial dimensions (nt == ny ==
+        nx), even the identity permutation can't be distinguished from a
+        genuine axis swap — detection must decline (return None) rather
+        than guess, and parsing falls through to the flat/tabular path.
+        Since a struct isn't itself flat/tabular-shaped, this ends up
+        with just the struct's own top-level size as record_count,
+        proving the gridded path did NOT silently produce wrong data."""
+        lon_1d = np.linspace(90.0, 91.0, 4)
+        lat_1d = np.linspace(20.0, 21.0, 4)
+        x, y = np.meshgrid(lon_1d, lat_1d)  # 4x4 grid
+        nt = 4  # deliberately == ny == nx
+        rng = np.random.default_rng(8)
+        val = rng.random((nt, 4, 4))
+
+        p = tmp_path / "fully_ambiguous.mat"
+        _save_gridded_struct_mat(p, x=x, y=y, val=val, time=739618.0 + np.arange(nt))
+
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(p)
+        # Fell through to flat/tabular parsing — did not register the
+        # struct as a detected gridded variable.
+        assert meta.variables == ["data"]
+        assert meta.extra.get("source_crs") is None and "crs_assumed" not in meta.extra
+
+    def test_ordinary_flat_tabular_mat_file_unaffected(self, legacy_mat_file):
+        """Regression guard: an ordinary flat .mat file (lat/lon/temperature
+        as top-level sibling variables, no struct at all) must parse
+        exactly as before — the gridded-struct detector must not
+        false-positive on it."""
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(legacy_mat_file)
+        assert set(meta.variables) == {"lat", "lon", "temperature"}
+        assert "source_crs" not in meta.extra
+
+    _REFERENCE_FILE = Path(__file__).resolve().parent / "fixtures" / "january_instantaneous.mat"
+
+    @pytest.mark.skipif(
+        not _REFERENCE_FILE.exists(), reason="real reference fixture not present in this checkout"
+    )
+    def test_reference_file_parses_and_ingests_without_crash(self, tmp_path):
+        """Integration test against the actual file that surfaced this
+        gap ('Unsupported numpy type 20' / structured-array crash) —
+        confirms the fix against real (not synthetic) data."""
+        parser = get_parser_for_format("mat")
+        meta = parser.parse(self._REFERENCE_FILE)
+
+        assert meta.variables == ["Tracer"]
+        assert meta.dimensions == {"y": 180, "x": 180, "time": 372}
+        # Bangladesh coastal (Sundarbans) bounds, not raw UTM meters.
+        assert 21.0 <= meta.spatial_lat_min <= 23.0
+        assert 88.0 <= meta.spatial_lon_min <= 91.0
+        assert meta.extra["crs_assumed"] is True
+        assert meta.extra["source_crs"] == "EPSG:32646"
+
+        artifact = parser.to_processed(self._REFERENCE_FILE, tmp_path)
+        assert artifact.row_count == 372 * 180 * 180
+
+
 class TestGeoTiffParser:
     def test_sniff_accepts_real_geotiff(self, geotiff_file):
         assert sniff_format(geotiff_file, "tif") == "tif"

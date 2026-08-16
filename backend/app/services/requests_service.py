@@ -19,7 +19,9 @@ from app.models.requests import (
 )
 from app.models.user import User
 from app.schemas.requests import GrantDuration, SearchCriteriaSchema
+from app.services import catalog_service
 from app.services.audit_service import write_audit_log
+from app.services.catalog_service import RecordsFilter
 
 
 def validate_scope_within_grant(requested: SearchCriteriaSchema, grant_scope: dict | None) -> None:
@@ -165,6 +167,48 @@ async def _get_request_with_relations(db: AsyncSession, request_id: uuid.UUID) -
     return request
 
 
+def _records_filter_from_search_criteria(search_criteria: dict | None) -> RecordsFilter:
+    """Builds a RecordsFilter from a stored search_criteria dict (same shape
+    as SearchCriteriaSchema) for computing how much of a dataset a
+    request's filters actually match. An empty/None search_criteria
+    produces an all-inclusive filter (matches the "no filters = all
+    records" semantics used everywhere else this scope is interpreted).
+
+    date_from/date_to are stored as ISO strings in the JSONB column (same
+    as everywhere else search_criteria is persisted) — RecordsFilter/
+    DatasetRecord.time expects real date objects, same conversion FastAPI's
+    Query(date | None) does automatically for the /records endpoint."""
+    criteria = search_criteria or {}
+    bounds = criteria.get("bounds")
+    raw_date_from = criteria.get("date_from")
+    raw_date_to = criteria.get("date_to")
+    return RecordsFilter(
+        parameters=criteria.get("parameters"),
+        date_from=date.fromisoformat(raw_date_from) if raw_date_from else None,
+        date_to=date.fromisoformat(raw_date_to) if raw_date_to else None,
+        lat_min=bounds.get("lat_min") if bounds else None,
+        lat_max=bounds.get("lat_max") if bounds else None,
+        lon_min=bounds.get("lon_min") if bounds else None,
+        lon_max=bounds.get("lon_max") if bounds else None,
+        source=criteria.get("source"),
+    )
+
+
+async def get_request_coverage(db: AsyncSession, request: DatasetRequest) -> dict:
+    """Computes matching_record_count/dataset_total_record_count/
+    matching_percent for one request's own search_criteria, so the admin
+    queue can show "how much of this dataset does the request cover"
+    without an extra round trip per row."""
+    f = _records_filter_from_search_criteria(request.search_criteria)
+    matching, total = await catalog_service.get_matching_record_counts(db, request.dataset_id, f)
+    percent = round((matching / total) * 100, 1) if total > 0 else 0.0
+    return {
+        "matching_record_count": matching,
+        "dataset_total_record_count": total,
+        "matching_percent": percent,
+    }
+
+
 async def get_request_for_admin(db: AsyncSession, request_id: uuid.UUID) -> DatasetRequest:
     return await _get_request_with_relations(db, request_id)
 
@@ -186,7 +230,11 @@ async def list_requests_for_user(
 
 async def list_requests_for_admin(
     db: AsyncSession, *, status_filter: str | None = None
-) -> list[DatasetRequest]:
+) -> list[tuple[DatasetRequest, dict]]:
+    """Returns each request paired with its dataset-coverage figures
+    (matching_record_count/dataset_total_record_count/matching_percent),
+    computed from the request's own search_criteria — lets the admin
+    queue show "how much of the dataset" at a glance for every row."""
     query = (
         select(DatasetRequest)
         .options(
@@ -198,45 +246,8 @@ async def list_requests_for_admin(
     if status_filter:
         query = query.where(DatasetRequest.status == status_filter)
     result = await db.execute(query)
-    return list(result.scalars().all())
-
-
-async def modify_request(
-    db: AsyncSession,
-    *,
-    request: DatasetRequest,
-    admin: User,
-    search_criteria: SearchCriteriaSchema,
-    ip_address: str | None,
-) -> DatasetRequest:
-    """Save Changes — persists an admin's edited filter configuration into
-    admin_modified_search_criteria WITHOUT approving or rejecting. Only
-    valid while the request is still pending (matching approve/reject's
-    own terminal-state guard) — modifying a decided request would be
-    meaningless since its AccessGrant.scope is already fixed. The
-    original request.search_criteria is never read from or written to
-    here, by design."""
-    if request.status != RequestStatus.PENDING.value:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Request is already {request.status}, cannot modify its filter configuration",
-        )
-
-    request.admin_modified_search_criteria = search_criteria.model_dump(exclude_none=True)
-    request.updated_at = datetime.now(UTC)
-
-    await write_audit_log(
-        db,
-        actor=admin,
-        action="Modified request filter configuration",
-        action_type=AuditActionType.DATASET,
-        target=str(request.id),
-        ip_address=ip_address,
-    )
-
-    await db.commit()
-    await db.refresh(request)
-    return await _get_request_with_relations(db, request.id)
+    requests = list(result.scalars().all())
+    return [(r, await get_request_coverage(db, r)) for r in requests]
 
 
 async def approve_request(
@@ -258,17 +269,13 @@ async def approve_request(
     now = datetime.now(UTC)
     expires_at = compute_expiry(now, duration, custom_expires_at)
 
-    # Precedence for the grant's final scope: an override passed directly
-    # to this approve call (e.g. approving straight from the Modify modal
-    # without a separate Save Changes step first) wins; otherwise a
-    # previously-saved admin modification (Save Changes) wins; otherwise
-    # the user's original, untouched search_criteria. request.
-    # search_criteria itself is NEVER written to below — it stays exactly
-    # what the user originally submitted, permanently.
+    # An override passed directly to this approve call takes precedence;
+    # otherwise the grant's scope is exactly the user's original,
+    # untouched search_criteria. request.search_criteria itself is NEVER
+    # written to below — it stays exactly what the user originally
+    # submitted, permanently.
     if search_criteria_override is not None:
         scope = search_criteria_override.model_dump(exclude_none=True)
-    elif request.admin_modified_search_criteria is not None:
-        scope = request.admin_modified_search_criteria
     else:
         scope = request.search_criteria
 
@@ -290,12 +297,6 @@ async def approve_request(
     request.updated_at = now
     if note:
         request.admin_note = note
-    # An override supplied directly at approval time (not previously
-    # saved via Save Changes) is recorded into admin_modified_search_
-    # criteria too, so the review trail is complete either way — but
-    # search_criteria (the original) is never touched here.
-    if search_criteria_override is not None:
-        request.admin_modified_search_criteria = scope
 
     requester = await db.get(User, request.user_id)
     if requester is not None:

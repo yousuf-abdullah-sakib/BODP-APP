@@ -47,10 +47,11 @@ export interface RequestSummary {
 
 export interface RequestDetail extends RequestSummary {
   user: RequestUserSummary;
-  // The admin's in-progress edited filter configuration (Save Changes),
-  // separate from search_criteria (the immutable original). Null until an
-  // admin has actually modified and saved this request's scope.
-  admin_modified_search_criteria: SearchCriteria | null;
+  // How much of the dataset this request's own search_criteria matches —
+  // computed server-side so the admin queue can show coverage at a glance.
+  matching_record_count: number;
+  dataset_total_record_count: number;
+  matching_percent: number;
 }
 
 export interface GrantSummary {

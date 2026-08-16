@@ -102,26 +102,18 @@ class RequestSummary(BaseModel):
 
 
 class RequestDetail(RequestSummary):
-    """Adds requester identity plus the admin's in-progress modified
-    filter configuration (if any) — used on the admin review queue. The
-    end user's own /me/requests view (RequestSummary) never exposes
-    admin_modified_search_criteria; it's an internal review artifact
-    until a decision (approve/reject) is made, at which point the
-    resulting AccessGrant.scope is what the user actually sees."""
+    """Adds requester identity plus dataset-coverage figures for the
+    admin review queue — how much of the dataset the requester's own
+    search_criteria actually matches, computed once per list call so an
+    admin can judge scope at a glance without opening anything."""
 
     user: RequestUserSummary
-    admin_modified_search_criteria: SearchCriteriaSchema | None = None
-
-
-class ModifyRequestBody(BaseModel):
-    """Save Changes — persists an admin's edited filter configuration into
-    DatasetRequest.admin_modified_search_criteria WITHOUT approving or
-    rejecting. Distinct from ApproveRequestBody's search_criteria (which
-    approves immediately, sourced from either the original or a modified
-    scope) — this lets an admin review/edit now and decide later, and
-    other admins can see the saved modification in the meantime."""
-
-    search_criteria: SearchCriteriaSchema
+    # Defaults let RequestDetail.model_validate() build from a bare ORM
+    # object (which has no such attributes); routers always overwrite
+    # these via model_copy(update=coverage) with real computed values.
+    matching_record_count: int = 0
+    dataset_total_record_count: int = 0
+    matching_percent: float = 0.0
 
 
 class ApproveRequestBody(BaseModel):

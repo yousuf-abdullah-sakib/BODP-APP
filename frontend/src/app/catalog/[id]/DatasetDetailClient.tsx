@@ -85,8 +85,21 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
   const hasApprovedTimeDimension = schema
     ? schema.variables.some((v) => v.roles.includes("dimension") && v.data_type === "temporal")
     : true;
+  // Matches the backend's own lat/lon column-alias detection exactly
+  // (see backend/app/services/parsers/csv_parser.py's _LAT_ALIASES/
+  // _LON_ALIASES and scope_filter.py's identical list) — a dataset
+  // ingested with "latitude"/"longitude" headers instead of "lat"/"lon"
+  // is just as spatially filterable, and must not silently lose its
+  // Geographic Bounding Box section just because the column happened to
+  // be named the long way.
+  const _LAT_NAMES = new Set(["lat", "latitude", "y"]);
+  const _LON_NAMES = new Set(["lon", "lng", "longitude", "x"]);
   const hasApprovedSpatialDimension = schema
-    ? schema.variables.some((v) => v.roles.includes("dimension") && (v.name === "lat" || v.name === "lon"))
+    ? schema.variables.some(
+        (v) =>
+          v.roles.includes("dimension") &&
+          (_LAT_NAMES.has(v.name.toLowerCase()) || _LON_NAMES.has(v.name.toLowerCase()))
+      )
     : true;
   const hasApprovedDepthDimension = schema
     ? schema.variables.some((v) => v.roles.includes("dimension") && v.name === "depth")

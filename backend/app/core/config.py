@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     # load that risks OOMing the ingestion worker.
     LEGACY_MAT_MAX_SIZE_MB: int = 2000
 
+    # Fallback CRS for a gridded MATLAB struct (.mat) file whose X/Y
+    # coordinates are clearly projected (large values, not lon/lat degree
+    # range) and carry no embedded projection metadata — used only when
+    # neither the file itself nor a future per-upload override specifies
+    # one. UTM zone 46N covers Bangladesh's coastal operating area, which
+    # is where every gridded-struct .mat file ingested so far originates.
+    DEFAULT_PROJECTED_CRS: str = "EPSG:32646"
+
     # --- Ingestion worker timeouts (Phase 2) ---
     #
     # A single global timeout doesn't fit an ingestion job whose duration

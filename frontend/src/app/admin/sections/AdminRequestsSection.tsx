@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { useToast } from "@/context/ToastContext";
 import StatusBadge from "@/components/ui/StatusBadge";
 import { approveRequest, getAdminRequests, rejectRequest } from "@/lib/api/admin-requests";
-import ModifyApproveModal from "./ModifyApproveModal";
 import RejectRequestModal from "./RejectRequestModal";
 import GrantDurationModal from "./GrantDurationModal";
 import type { GrantDuration, RequestDetail, SearchCriteria } from "@/lib/types/requests";
@@ -16,24 +15,24 @@ const TABS: { key: "all" | RequestDetail["status"]; label: string }[] = [
   { key: "rejected", label: "Rejected" },
 ];
 
-/** Always-visible on the request card (not gated behind opening Modify) —
- * shows the researcher's original filter configuration, plus the admin's
- * saved modification if one exists, so an admin can see the full scope of
- * a request without an extra click. */
+/** Always-visible on the request card — shows exactly what the researcher
+ * filtered for (parameters, date range, spatial bounds, etc.) plus how
+ * much of the dataset that scope actually covers, so an admin can decide
+ * Approve/Reject from the card itself with no extra click. */
 function RequestFilterConfig({ request }: { request: RequestDetail }) {
-  const original = request.search_criteria;
-  const modified = request.admin_modified_search_criteria;
-  if (!original && !modified) return null;
+  const c = request.search_criteria;
 
-  function summarize(c: SearchCriteria): string[] {
+  function summarize(criteria: SearchCriteria): string[] {
     const parts: string[] = [];
-    if (c.parameters && c.parameters.length > 0) parts.push(`Parameters: ${c.parameters.join(", ")}`);
-    if (c.category) parts.push(`Category: ${c.category}`);
-    if (c.source) parts.push(`Source: ${c.source}`);
-    if (c.date_from || c.date_to) parts.push(`Date: ${c.date_from || "—"} to ${c.date_to || "—"}`);
-    if (c.bounds) {
+    if (criteria.parameters && criteria.parameters.length > 0)
+      parts.push(`Parameters: ${criteria.parameters.join(", ")}`);
+    if (criteria.category) parts.push(`Category: ${criteria.category}`);
+    if (criteria.source) parts.push(`Source: ${criteria.source}`);
+    if (criteria.date_from || criteria.date_to)
+      parts.push(`Date: ${criteria.date_from || "—"} to ${criteria.date_to || "—"}`);
+    if (criteria.bounds) {
       parts.push(
-        `Spatial: Lat ${c.bounds.lat_min.toFixed(2)}°–${c.bounds.lat_max.toFixed(2)}°, Lon ${c.bounds.lon_min.toFixed(2)}°–${c.bounds.lon_max.toFixed(2)}°`
+        `Spatial: Lat ${criteria.bounds.lat_min.toFixed(2)}°–${criteria.bounds.lat_max.toFixed(2)}°, Lon ${criteria.bounds.lon_min.toFixed(2)}°–${criteria.bounds.lon_max.toFixed(2)}°`
       );
     }
     return parts;
@@ -41,18 +40,17 @@ function RequestFilterConfig({ request }: { request: RequestDetail }) {
 
   return (
     <div style={{ marginBottom: "1rem" }}>
-      <div className="mini-label">Filter Configuration</div>
-      {original && (
-        <div className="req-letter-box" style={{ fontSize: "0.78rem", marginBottom: modified ? "0.5rem" : 0 }}>
-          <b style={{ color: "var(--text-muted)" }}>Original request:</b>{" "}
-          {summarize(original).length > 0 ? summarize(original).join(" · ") : "No filters set"}
-        </div>
-      )}
-      {modified && (
-        <div className="req-letter-box" style={{ fontSize: "0.78rem", borderLeftColor: "var(--accent)" }}>
-          <b style={{ color: "var(--accent)" }}>Admin modified:</b> {summarize(modified).join(" · ")}
-        </div>
-      )}
+      <div className="mini-label">Requested Filter Configuration</div>
+      <div className="req-letter-box" style={{ fontSize: "0.78rem", marginBottom: "0.5rem" }}>
+        {c && summarize(c).length > 0 ? summarize(c).join(" · ") : "No filters set — full dataset requested"}
+      </div>
+      <div style={{ fontSize: "0.78rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+        <b style={{ color: "var(--text-muted)" }}>Coverage:</b>
+        <span className="chip">{request.matching_percent}% of dataset</span>
+        <span style={{ color: "var(--text-muted)" }}>
+          ({request.matching_record_count.toLocaleString()} of {request.dataset_total_record_count.toLocaleString()} records)
+        </span>
+      </div>
     </div>
   );
 }
@@ -74,12 +72,10 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [modifyTarget, setModifyTarget] = useState<RequestDetail | null>(null);
   const [rejectTarget, setRejectTarget] = useState<RequestDetail | null>(null);
   const [durationTarget, setDurationTarget] = useState<{
     request: RequestDetail;
     note: string;
-    criteria?: SearchCriteria;
   } | null>(null);
 
   function refetch() {
@@ -101,17 +97,11 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
     setDurationTarget({ request: r, note: "" });
   }
 
-  function handleModifyConfirm(note: string, criteria: SearchCriteria | undefined) {
-    if (!modifyTarget) return;
-    setDurationTarget({ request: modifyTarget, note, criteria });
-    setModifyTarget(null);
-  }
-
   async function handleDurationConfirm(duration: GrantDuration, customDate?: string) {
     if (!durationTarget) return;
-    const { request: r, note, criteria } = durationTarget;
+    const { request: r, note } = durationTarget;
     try {
-      await approveRequest(r.id, { duration, customExpiresAt: customDate, note, searchCriteria: criteria });
+      await approveRequest(r.id, { duration, customExpiresAt: customDate, note });
       toast(`Approved. ${r.user.full_name} now has access to "${r.dataset.title}".`, "success");
       setDurationTarget(null);
       refetch();
@@ -210,9 +200,6 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
 
                 {r.status === "pending" ? (
                   <div className="req-actions-row">
-                    <button className="btn-ghost-sm" onClick={() => setModifyTarget(r)}>
-                      ✎ Modify &amp; Approve
-                    </button>
                     <button className="btn-danger-sm" onClick={() => setRejectTarget(r)}>
                       ✗ Reject
                     </button>
@@ -233,14 +220,6 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
         </div>
       )}
 
-      {modifyTarget && (
-        <ModifyApproveModal
-          request={modifyTarget}
-          onClose={() => setModifyTarget(null)}
-          onConfirm={handleModifyConfirm}
-          onSaved={refetch}
-        />
-      )}
       {rejectTarget && <RejectRequestModal onClose={() => setRejectTarget(null)} onConfirm={handleRejectConfirm} />}
       {durationTarget && (
         <GrantDurationModal
