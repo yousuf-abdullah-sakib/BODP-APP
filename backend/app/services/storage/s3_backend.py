@@ -129,6 +129,22 @@ class S3CompatibleBackend(StorageService):
             logger.exception("storage.delete_failed", backend=self._name, bucket=bucket, key=key)
             raise StorageBackendError(f"Failed to delete {bucket}/{key}") from exc
 
+    def delete_prefix(self, bucket: str, prefix: str) -> None:
+        """PLAN.md Phase 5 — deletes every object under `prefix` (a Zarr
+        store's many small chunk/metadata objects), paginated so this
+        works regardless of how many chunks a large store has, and
+        batched via delete_objects (up to 1000 keys per call — S3's own
+        limit) rather than one delete_object call per chunk."""
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+                if keys:
+                    self._client.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+        except ClientError as exc:
+            logger.exception("storage.delete_prefix_failed", backend=self._name, bucket=bucket, prefix=prefix)
+            raise StorageBackendError(f"Failed to delete prefix {bucket}/{prefix}") from exc
+
     def exists(self, bucket: str, key: str) -> bool:
         return self.stat(bucket, key) is not None
 

@@ -8,6 +8,7 @@ from app.core.deps import get_client_ip
 from app.core.permissions import require_permission
 from app.models.user import User
 from app.schemas.admin_dataset_schema import (
+    DatasetFileStorageSummary,
     DatasetSchemaDetail,
     DatasetSchemaReviewResult,
     DatasetSchemaReviewSummary,
@@ -47,6 +48,7 @@ async def get_dataset_schema(
         schema_reviewed_at=data["schema_reviewed_at"],
         schema_reviewed_by_name=data["schema_reviewed_by_name"],
         variables=[DatasetVariablePublic.model_validate(v) for v in data["variables"]],
+        files=[DatasetFileStorageSummary.model_validate(f) for f in data["files"]],
     )
 
 

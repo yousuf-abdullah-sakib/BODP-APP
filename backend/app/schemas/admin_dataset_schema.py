@@ -39,6 +39,22 @@ class DatasetSchemaReviewSummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DatasetFileStorageSummary(BaseModel):
+    """PLAN.md Phase 5 — one row per DatasetFile, showing how its actual
+    observation values are stored/queried (Admin Dashboard's storage_kind
+    visibility item). storage_kind is nullable — a pre-Phase-5 file that
+    hasn't been through the best-effort backfill script yet shows null,
+    never a fabricated guess."""
+
+    id: uuid.UUID
+    file_name: str
+    file_format: str | None
+    storage_kind: str | None
+    uploaded_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
 class DatasetSchemaDetail(BaseModel):
     dataset_id: uuid.UUID
     dataset_code: str
@@ -46,6 +62,7 @@ class DatasetSchemaDetail(BaseModel):
     schema_reviewed_at: datetime | None
     schema_reviewed_by_name: str | None
     variables: list[DatasetVariablePublic]
+    files: list[DatasetFileStorageSummary]
 
     model_config = {"from_attributes": True}
 

@@ -34,10 +34,10 @@ class TestBulkImport:
         self, client, admin_headers, tmp_path
     ):
         """Acceptance criterion from PLAN.md: bulk-importing a file must
-        produce an identical Dataset/DatasetFile/DatasetRecord/
-        DatasetVariable result to uploading the same file through the API
-        — same shell-row creation, same ingestion task, no parallel code
-        path."""
+        produce an identical Dataset/DatasetFile/DatasetVariable result to
+        uploading the same file through the API — same shell-row
+        creation, same ingestion task, no parallel code path. PLAN.md
+        Phase 5: neither path writes DatasetRecord rows anymore."""
         dataset_id = await _create_dataset(client, admin_headers)
         source = tmp_path / "bulk_real.csv"
         source.write_bytes(_make_csv_bytes())
@@ -54,6 +54,7 @@ class TestBulkImport:
             dataset_file = await db.get(DatasetFile, uuid.UUID(result["dataset_file_id"]))
             assert dataset_file.file_metadata is not None
             assert "sea_surface_temp" in dataset_file.file_metadata["variables"]
+            assert dataset_file.storage_kind == "parquet"
 
             dataset = await db.get(Dataset, uuid.UUID(dataset_id))
             assert dataset.record_count == 15
@@ -63,7 +64,7 @@ class TestBulkImport:
                     select(DatasetRecord).where(DatasetRecord.dataset_id == uuid.UUID(dataset_id))
                 )
             ).scalars().all()
-            assert len(records) == 15  # identical to what the HTTP upload path produces
+            assert records == []  # identical to what the HTTP upload path produces
 
     async def test_raises_for_unknown_dataset(self, tmp_path):
         source = tmp_path / "orphan.csv"

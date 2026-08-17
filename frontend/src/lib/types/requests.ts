@@ -14,9 +14,16 @@ export interface SearchCriteria {
   // Checkbox multi-select — zero/omitted means "all approved parameters"
   // (no filtering), one or more means restrict to exactly those values.
   parameters?: string[] | null;
+  quality?: string | null;
   source?: string | null;
+  platform?: string | null;
+  station?: string | null;
+  format?: string | null;
+  processing_level?: string | null;
   date_from?: string | null;
   date_to?: string | null;
+  depth_min?: number | null;
+  depth_max?: number | null;
   bounds?: SpatialBounds | null;
 }
 
@@ -47,11 +54,17 @@ export interface RequestSummary {
 
 export interface RequestDetail extends RequestSummary {
   user: RequestUserSummary;
-  // How much of the dataset this request's own search_criteria matches —
-  // computed server-side so the admin queue can show coverage at a glance.
-  matching_record_count: number;
-  dataset_total_record_count: number;
-  matching_percent: number;
+  // How much of the dataset this request's own search_criteria matched,
+  // AS OF WHEN THE REQUEST WAS SUBMITTED — a stored snapshot (computed
+  // once server-side at submission time), not recomputed on every admin
+  // page load. null means this request predates the snapshot mechanism.
+  matching_record_count: number | null;
+  dataset_total_record_count: number | null;
+  matching_percent: number | null;
+  // True when the dataset's contents have changed since this snapshot
+  // was captured (re-ingested/added to) — the numbers above may no
+  // longer be current.
+  is_stale: boolean;
 }
 
 export interface GrantSummary {

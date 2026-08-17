@@ -5,6 +5,7 @@ import pandas as pd
 import xarray as xr
 
 from app.services.parsers.base import (
+    DataShape,
     FileParser,
     ParsedFileMetadata,
     ParserError,
@@ -20,36 +21,15 @@ _LON_NAMES = ("lon", "long", "longitude", "x")
 # coordinate at all despite genuinely having one.
 _TIME_NAMES = ("time", "date", "datetime", "valid_time")
 
-# Phase 2 chunking/output-format constants — the two open design decisions
-# PLAN.md flagged as needing to be settled during implementation, not
-# guessed at up front:
-#
-# 1. Chunk-axis strategy: chunk along the detected time dimension when one
-#    exists (matches the stated preference for oceanographic/model data,
-#    where "give me the next N time steps" is the natural access pattern
-#    for both ingestion and later Visualize time-series queries) — sized
-#    so each chunk stays comfortably small regardless of how large the
-#    spatial grid per time step is. Falls back to dask's own "auto"
-#    chunking (spatial-axis-based) for a file with no detected time
-#    dimension at all (e.g. a static multidimensional field).
+# Chunk-axis strategy: chunk along the detected time dimension when one
+# exists (matches the stated preference for oceanographic/model data,
+# where "give me the next N time steps" is the natural access pattern
+# for both ingestion and later Visualize time-series queries) — sized
+# so each chunk stays comfortably small regardless of how large the
+# spatial grid per time step is. Falls back to dask's own "auto"
+# chunking (spatial-axis-based) for a file with no detected time
+# dimension at all (e.g. a static multidimensional field).
 _TIME_CHUNK_SIZE = 24  # e.g. 24 monthly steps, or 24 hourly steps — small either way
-
-# 2. Zarr-vs-Parquet output heuristic: a flattened tidy Parquet table is
-#    the right shape for the catalog/DatasetRecord query path (Phase 2's
-#    _write_dataset_records reads exactly this), but flattening every
-#    element of a genuinely large multidimensional grid into a long/tidy
-#    table is both wasteful (huge row count, mostly repeated coordinate
-#    values) and structurally the wrong representation for chunked/
-#    indexable array access. Above this many total elements (product of
-#    every dimension's size), to_processed() switches to writing a
-#    chunked Zarr store instead of attempting a flattened Parquet
-#    conversion. 50 million elements is a deliberately conservative
-#    threshold — a modest laptop-scale to_dataframe() call already
-#    struggles well before that; the real intent is "don't even attempt
-#    the tidy-table flatten path once the file is unambiguously grid-
-#    shaped and large," not to finely tune where Parquet stops being
-#    ideal.
-_ZARR_THRESHOLD_ELEMENTS = 50_000_000
 
 
 def _find_coord(ds: xr.Dataset, names: tuple[str, ...]) -> str | None:
@@ -65,6 +45,22 @@ def _total_elements(sizes: dict) -> int:
     for v in sizes.values():
         total *= max(int(v), 1)
     return total
+
+
+def _is_gridded(ds: xr.Dataset, *, time_name: str | None) -> bool:
+    """Shape-based routing (PLAN.md Phase 5): a dataset is GRIDDED if any
+    real data variable is indexed by more than one non-time dimension —
+    genuine multi-axis array indexing (e.g. (time, lat, lon)), not a
+    single shared "observation" index the way a tabular/per-row NetCDF
+    (e.g. (obs,) with lat/lon as same-length 1-D coordinate arrays, not
+    axes the data variable is actually indexed by) would be. Determined
+    from dimensionality alone, never element count — a 4x4 grid is just
+    as GRIDDED as a 4000x4000 one; see DataShape.GRIDDED's docstring."""
+    for var in ds.data_vars.values():
+        non_time_dims = [d for d in var.dims if d != time_name]
+        if len(non_time_dims) >= 2:
+            return True
+    return False
 
 
 class NetcdfParser(FileParser):
@@ -115,8 +111,10 @@ class NetcdfParser(FileParser):
 
         dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
         record_count = _total_elements(dimensions)
+        shape = DataShape.GRIDDED if _is_gridded(ds, time_name=time_name) else DataShape.TABULAR
 
         return ParsedFileMetadata(
+            shape=shape,
             variables=list(ds.data_vars.keys()),
             dimensions=dimensions,
             spatial_lat_min=lat_min,
@@ -137,10 +135,10 @@ class NetcdfParser(FileParser):
     def to_processed(self, path: Path, output_dir: Path) -> ProcessedArtifact:
         try:
             with xr.open_dataset(path, decode_times=True, chunks="auto") as probe:
-                total_elements = _total_elements(dict(probe.sizes))
                 time_name = _find_coord(probe, _TIME_NAMES)
+                gridded = _is_gridded(probe, time_name=time_name)
 
-            if total_elements > _ZARR_THRESHOLD_ELEMENTS:
+            if gridded:
                 return self._to_zarr(path, output_dir, time_name=time_name)
             return self._to_parquet(path, output_dir, time_name=time_name)
         except ParserError:
@@ -187,10 +185,10 @@ class NetcdfParser(FileParser):
             else:
                 # No time dimension to chunk along — fall back to a single
                 # to_dataframe() call. Safe here specifically because this
-                # method is only reached when to_processed()'s size
-                # heuristic already decided the file is small enough
-                # (below _ZARR_THRESHOLD_ELEMENTS) not to need Zarr; a
-                # large timeless file goes to _to_zarr instead.
+                # method is only reached when to_processed()'s shape check
+                # already decided the file is TABULAR (a real GRIDDED
+                # dataset — multi-axis-indexed, any size — always goes to
+                # _to_zarr instead, never here).
                 df = ds.to_dataframe().reset_index()
                 table = pa.Table.from_pandas(df, preserve_index=False)
                 writer = pq.ParquetWriter(output_path, table.schema)
@@ -208,41 +206,27 @@ class NetcdfParser(FileParser):
         )
 
     def _to_zarr(self, path: Path, output_dir: Path, *, time_name: str | None) -> ProcessedArtifact:
-        """Writes the dataset as a chunked Zarr store — appropriate for
-        large, genuinely multidimensional data where a flattened tidy
-        table would be both huge and the wrong representation for
-        indexable array access. xarray's to_zarr() writes chunk-by-chunk
-        internally (that's the whole point of the Zarr chunked-array
-        format), so this never materializes the full dataset in memory
-        the way ds.to_dataframe() on an unchunked open would."""
-        import shutil
-        import zipfile
+        """Writes the dataset as a chunked Zarr store — the correct
+        representation for GRIDDED (genuinely multi-axis-indexed) data,
+        regardless of size (PLAN.md Phase 5 — shape-based, not size-based,
+        routing). xarray's to_zarr() writes chunk-by-chunk internally
+        (that's the whole point of the Zarr chunked-array format), so
+        this never materializes the full dataset in memory the way
+        ds.to_dataframe() on an unchunked open would.
 
+        Phase 5: writes real Zarr directory layout (one file per chunk +
+        per-array metadata) rather than Phase 2's zipped single object —
+        the ingestion task uploads every file under this directory to
+        MinIO as individual objects under a shared prefix, enabling
+        genuine chunk-range reads. See ProcessedArtifact's docstring."""
         zarr_dir = output_dir / "processed.zarr"
-        output_path = output_dir / "processed.zarr.zip"
 
         with self._open_chunked(path, time_name=time_name) as ds:
             ds.to_zarr(zarr_dir, mode="w")
 
-        # Zip the store into one object so it fits the existing
-        # single-file storage.put() pipeline unchanged (see
-        # ProcessedArtifact.is_zarr's docstring) — walks the store's own
-        # directory tree, never loads chunk contents through Python
-        # (shutil/zipfile stream file-to-file). Paths are relative to
-        # zarr_dir ITSELF (not its parent) so the Zarr group sits at the
-        # zip's root — zarr.storage.ZipStore/xarray's open_zarr expect the
-        # group's own files (.zgroup, .zattrs, etc.) at that root, not
-        # nested under a "processed.zarr/" prefix.
-        with zipfile.ZipFile(output_path, "w", zipfile.ZIP_STORED) as zf:
-            for file_path in zarr_dir.rglob("*"):
-                if file_path.is_file():
-                    zf.write(file_path, file_path.relative_to(zarr_dir))
-        shutil.rmtree(zarr_dir, ignore_errors=True)
-
         return ProcessedArtifact(
-            local_path=output_path,
-            content_type="application/zip",
-            file_extension="zarr.zip",
+            local_dir=zarr_dir,
+            content_type="application/octet-stream",
             row_count=None,
             is_zarr=True,
         )

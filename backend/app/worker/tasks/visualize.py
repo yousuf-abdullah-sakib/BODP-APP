@@ -4,7 +4,7 @@ import structlog
 from sqlalchemy import func, select
 
 from app.core.database import get_sync_db
-from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, Station
+from app.models.catalog import Dataset, DatasetCategory, DatasetFile, DatasetRecord, StorageKind, Station
 from app.models.visualize import VisualizationJob, VizJobStatus
 from app.schemas.visualize import SpatialPointSchema, SpatialRequest
 from app.worker.celery_app import celery_app
@@ -99,6 +99,49 @@ def _run_spatial_job(db, job: VisualizationJob) -> dict:
         SpatialPointSchema(station=row.name, lat=float(row.lat), lon=float(row.lon), value=float(row.value))
         for row in rows
     ]
+
+    # PLAN.md Phase 5: same additive PARQUET/CHUNKED_ARRAY routing as
+    # visualize_service.get_spatial_points' sync fast path — this Celery
+    # task is the async-dispatch counterpart for oversized requests, and
+    # must combine both storage kinds identically, not just the legacy
+    # SQL points, or a heavy request would silently drop new-architecture
+    # data that a light request (computed in-process) would have included.
+    if params.dataset_id:
+        from app.services import gridded_query_service, tabular_query_service
+        from app.services.catalog_service import RecordsFilter
+
+        record_filter = RecordsFilter(
+            date_from=params.date_from,
+            date_to=params.date_to,
+            lat_min=params.lat_min,
+            lat_max=params.lat_max,
+            lon_min=params.lon_min,
+            lon_max=params.lon_max,
+            depth_min=params.depth_min,
+            depth_max=params.depth_max,
+            station=params.station,
+        )
+        non_legacy_files = (
+            db.execute(
+                select(DatasetFile).where(
+                    DatasetFile.dataset_id == params.dataset_id,
+                    DatasetFile.storage_kind.in_(
+                        [StorageKind.PARQUET.value, StorageKind.CHUNKED_ARRAY.value]
+                    ),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for file in non_legacy_files:
+            if file.storage_kind == StorageKind.PARQUET.value:
+                file_points = tabular_query_service.get_spatial_points(file, params.parameter, record_filter)
+            else:
+                file_points = gridded_query_service.get_spatial_points(file, params.parameter, record_filter)
+            points.extend(
+                SpatialPointSchema(station=p.station, lat=p.lat, lon=p.lon, value=p.value)
+                for p in file_points
+            )
 
     grid, method_used = compute_interpolation(points, params)
 

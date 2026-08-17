@@ -46,6 +46,20 @@ def processed_key(
     return f"processed/{dataset_id}/{file_id}.{ext}"
 
 
+def processed_prefix(dataset_id: uuid.UUID | str, file_id: uuid.UUID | str) -> str:
+    """Prefix for a multi-object processed/ artifact (PLAN.md Phase 5) —
+    a Zarr store is a directory of many small chunk + metadata files, not
+    one blob, so GRIDDED data is uploaded as individual objects under
+    this shared prefix (`processed/{dataset_id}/{file_id}.zarr/...`)
+    rather than one zipped object. This is exactly the `raw_key()`
+    docstring's anticipated "raw_prefix()-style multi-object key"
+    extension, applied to the processed/ tier instead — enables genuine
+    chunk-range reads via ordinary per-object GETs (xarray/zarr/fsspec
+    talking to the S3-compatible backend directly), which a single
+    zipped object never could without a full-object download first."""
+    return f"processed/{dataset_id}/{file_id}.zarr"
+
+
 def extract_key(grant_id: uuid.UUID | str, extraction_id: uuid.UUID | str, extension: str) -> str:
     ext = extension.lstrip(".")
     return f"extracts/{grant_id}/{extraction_id}.{ext}"

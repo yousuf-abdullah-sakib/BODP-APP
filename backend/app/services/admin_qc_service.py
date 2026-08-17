@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.audit import AuditActionType
-from app.models.catalog import Dataset, DatasetRecord
+from app.models.catalog import Dataset, DatasetFile, DatasetRecord, StorageKind
 from app.models.uploads import (
     QualityIssue,
     QualityIssueSeverity,
@@ -16,6 +16,7 @@ from app.models.uploads import (
 from app.models.user import User
 from app.services.admin_notify_service import notify_admins
 from app.services.audit_service import write_audit_log
+from app.services.query_concurrency import bounded_to_thread
 
 # A material gap between a dataset's declared record_count and its actual
 # DatasetRecord row count flags "Missing Values" — DatasetRecord.value is
@@ -23,6 +24,18 @@ from app.services.audit_service import write_audit_log
 # this count-gap comparison is the practical equivalent for this schema.
 _MISSING_VALUES_THRESHOLD = 0.95
 _OUTLIER_STDDEV_MULTIPLIER = 3
+
+
+async def _parquet_files(db: AsyncSession) -> list[DatasetFile]:
+    """PLAN.md Phase 5: every PARQUET-backed DatasetFile across all
+    datasets — the input every detector below scans in addition to its
+    existing DatasetRecord query, closing the QC blind spot new tabular
+    ingestion would otherwise silently create (see this module's own
+    docstring addition / PLAN.md's "Admin QC scanning" item)."""
+    result = await db.execute(
+        select(DatasetFile).where(DatasetFile.storage_kind == StorageKind.PARQUET.value)
+    )
+    return list(result.scalars().all())
 
 
 async def _has_open_issue(db: AsyncSession, dataset_id: uuid.UUID, issue_type: str) -> bool:
@@ -63,6 +76,17 @@ async def _detect_duplicates(db: AsyncSession) -> list[QualityIssue]:
         .having(func.count() > 1)
     )
     dataset_ids_with_dupes = {row[0] for row in result.all()}
+
+    # PLAN.md Phase 5: same check against every PARQUET-backed file via
+    # DuckDB — additive, never replacing the DatasetRecord query above
+    # (a dataset can have files of both kinds, per the non-destructive
+    # migration requirement).
+    from app.services import tabular_query_service
+
+    for file in await _parquet_files(db):
+        has_dupes, _detail = await bounded_to_thread(tabular_query_service.detect_duplicates, file)
+        if has_dupes:
+            dataset_ids_with_dupes.add(file.dataset_id)
 
     issues = []
     for dataset_id in dataset_ids_with_dupes:
@@ -109,6 +133,18 @@ async def _detect_outliers(db: AsyncSession) -> list[QualityIssue]:
         if outlier_count > 0:
             flagged_datasets[dataset_id] = flagged_datasets.get(dataset_id, 0) + outlier_count
 
+    # PLAN.md Phase 5: same 3-sigma check against every PARQUET-backed
+    # file via DuckDB, summed additively into the same flagged_datasets
+    # totals the DatasetRecord query above populates.
+    from app.services import tabular_query_service
+
+    for file in await _parquet_files(db):
+        has_outliers, _detail, outlier_count = await bounded_to_thread(
+            tabular_query_service.detect_outliers, file, stddev_multiplier=_OUTLIER_STDDEV_MULTIPLIER
+        )
+        if has_outliers:
+            flagged_datasets[file.dataset_id] = flagged_datasets.get(file.dataset_id, 0) + outlier_count
+
     for dataset_id, total_outliers in flagged_datasets.items():
         if await _has_open_issue(db, dataset_id, QualityIssueType.OUTLIERS.value):
             continue
@@ -129,12 +165,28 @@ async def _detect_missing_values(db: AsyncSession) -> list[QualityIssue]:
     result = await db.execute(select(Dataset.id, Dataset.record_count).where(Dataset.record_count > 0))
     datasets = result.all()
 
+    # PLAN.md Phase 5: group PARQUET-backed files by dataset once, up
+    # front, so each dataset's loop iteration below can add its own
+    # files' actual row counts to the DatasetRecord count — a dataset's
+    # "actual" total must reflect BOTH storage kinds it may have.
+    from app.services import tabular_query_service
+    from app.services.catalog_service import RecordsFilter
+
+    parquet_files_by_dataset: dict[uuid.UUID, list[DatasetFile]] = {}
+    for file in await _parquet_files(db):
+        parquet_files_by_dataset.setdefault(file.dataset_id, []).append(file)
+
     issues = []
     for dataset_id, declared_count in datasets:
         actual_result = await db.execute(
             select(func.count()).select_from(DatasetRecord).where(DatasetRecord.dataset_id == dataset_id)
         )
         actual_count = actual_result.scalar_one()
+        for file in parquet_files_by_dataset.get(dataset_id, []):
+            _matching, file_total = await bounded_to_thread(
+                tabular_query_service.get_matching_record_counts, file, RecordsFilter()
+            )
+            actual_count += file_total
         if actual_count < declared_count * _MISSING_VALUES_THRESHOLD:
             if await _has_open_issue(db, dataset_id, QualityIssueType.MISSING_VALUES.value):
                 continue

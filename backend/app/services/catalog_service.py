@@ -9,13 +9,16 @@ from app.core.cache import cache_get_json, cache_set_json
 from app.models.catalog import (
     Dataset,
     DatasetCategory,
+    DatasetFile,
     DatasetRecord,
     DatasetStatus,
     DatasetVariable,
     QualityFlag,
     Station,
+    StorageKind,
 )
 from app.schemas.catalog import DatasetSchemaFilters, DatasetSort, SchemaFilterVariable
+from app.services.query_concurrency import bounded_to_thread
 
 _TAXONOMY_CACHE_KEY = "catalog:taxonomy"
 _TAXONOMY_CACHE_TTL_SECONDS = 300
@@ -358,13 +361,15 @@ def _apply_record_filters(query, dataset_id: uuid.UUID, f: RecordsFilter):
     return query
 
 
-async def get_matching_record_counts(
+async def _get_matching_record_counts_sql(
     db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter
 ) -> tuple[int, int]:
-    """Returns (matching_count, dataset_total_count) only — no preview rows
-    or quality breakdown — for callers that just need the coverage numbers
-    (e.g. the admin request queue's "X% of dataset" figure) without the
-    cost of a full get_filtered_records call per request."""
+    """Legacy path — queries DatasetRecord SQL rows, exactly as before
+    PLAN.md Phase 5. Untouched: still correct and still the only path for
+    storage_kind=ROW_RECORDS files, which is every file ingested before
+    Phase 5's rollout. Never called directly by external code anymore —
+    get_matching_record_counts (below) is the public entry point, which
+    calls this only for a dataset's ROW_RECORDS-backed portion."""
     base_query = select(DatasetRecord)
     if f.station:
         base_query = base_query.join(Station, Station.id == DatasetRecord.station_id)
@@ -381,12 +386,11 @@ async def get_matching_record_counts(
     return matching_count, dataset_total_count
 
 
-async def get_filtered_records(
+async def _get_filtered_records_sql(
     db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter, *, preview_limit: int
 ) -> tuple[list[DatasetRecord], int, int, dict[str, int]]:
-    """Returns (preview_rows, matching_count, dataset_total_count,
-    quality_breakdown) for the /catalog/{id}/records endpoint (Master Plan
-    §3 Phase 3 task 3)."""
+    """Legacy path — see _get_matching_record_counts_sql's docstring;
+    same relationship to get_filtered_records (below)."""
     base_query = select(DatasetRecord)
     if f.station:
         base_query = base_query.join(Station, Station.id == DatasetRecord.station_id)
@@ -432,3 +436,139 @@ async def get_filtered_records(
     preview_rows = list(preview_result.scalars().all())
 
     return preview_rows, matching_count, dataset_total_count, quality_breakdown
+
+
+async def _non_legacy_dataset_files(db: AsyncSession, dataset_id: uuid.UUID) -> dict[str, list[DatasetFile]]:
+    """Returns only a dataset's PARQUET/CHUNKED_ARRAY DatasetFile rows,
+    grouped by storage_kind — the ADDITIVE query targets Phase 5 routing
+    layers on top of the always-run legacy SQL path (see
+    get_matching_record_counts/get_filtered_records below for why this
+    is additive-only, never a replacement for the SQL query).
+
+    Deliberately does NOT attempt to enumerate ROW_RECORDS files at all
+    — DatasetRecord rows are not guaranteed to trace back to a
+    DatasetFile row in the first place (e.g. seed_catalog.py's demo data,
+    and every existing test fixture that seeds DatasetRecord rows
+    directly without a DatasetFile) — the SQL path's own dataset_id-scoped
+    query already finds them correctly and unconditionally, exactly as it
+    did before Phase 5 existed."""
+    result = await db.execute(
+        select(DatasetFile).where(
+            DatasetFile.dataset_id == dataset_id,
+            DatasetFile.storage_kind.in_([StorageKind.PARQUET.value, StorageKind.CHUNKED_ARRAY.value]),
+        )
+    )
+    files = list(result.scalars().all())
+    grouped: dict[str, list[DatasetFile]] = {}
+    for file in files:
+        grouped.setdefault(file.storage_kind, []).append(file)
+    return grouped
+
+
+async def get_matching_record_counts(
+    db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter
+) -> tuple[int, int]:
+    """Returns (matching_count, dataset_total_count) only — no preview rows
+    or quality breakdown — for callers that just need the coverage numbers
+    (e.g. the admin request queue's "X% of dataset" figure) without the
+    cost of a full get_filtered_records call per request.
+
+    PLAN.md Phase 5 routing: the legacy SQL path runs UNCONDITIONALLY
+    (exactly as it always did — DatasetRecord rows are not guaranteed to
+    trace back to a DatasetFile row, so "does this dataset have a
+    ROW_RECORDS-kind file" is not a safe gate for whether SQL rows
+    exist), with PARQUET (DuckDB) and CHUNKED_ARRAY (xarray/Zarr) files
+    summed in additively on top. A dataset with files of more than one
+    kind (a real, expected state — the old and new architectures run in
+    parallel, see PLAN.md's "What happens to existing DatasetRecord
+    data") gets a genuinely combined total, never silently dropping one
+    kind's contribution."""
+    sql_matching, sql_total = await _get_matching_record_counts_sql(db, dataset_id, f)
+    matching_total = sql_matching
+    dataset_total = sql_total
+
+    grouped = await _non_legacy_dataset_files(db, dataset_id)
+    for file in grouped.get(StorageKind.PARQUET.value, []):
+        from app.services import tabular_query_service
+
+        file_matching, file_total = await bounded_to_thread(
+            tabular_query_service.get_matching_record_counts, file, f
+        )
+        matching_total += file_matching
+        dataset_total += file_total
+
+    for file in grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+        from app.services import gridded_query_service
+
+        file_matching, file_total = await bounded_to_thread(
+            gridded_query_service.get_matching_record_counts, file, f
+        )
+        matching_total += file_matching
+        dataset_total += file_total
+
+    return matching_total, dataset_total
+
+
+async def get_filtered_records(
+    db: AsyncSession, dataset_id: uuid.UUID, f: RecordsFilter, *, preview_limit: int
+) -> tuple[list, int, int, dict[str, int]]:
+    """Returns (preview_rows, matching_count, dataset_total_count,
+    quality_breakdown) for the /catalog/{id}/records endpoint.
+
+    PLAN.md Phase 5 routing: combines every storage kind a dataset's
+    files actually use, same as get_matching_record_counts. preview_rows
+    may be a mix of real DatasetRecord ORM objects (ROW_RECORDS) and
+    duck-typed TabularPreviewRow/GriddedPreviewRow objects (PARQUET/
+    CHUNKED_ARRAY) — the router (routers/catalog.py) already reads every
+    preview row via plain attribute access (r.id, r.time, ...), which
+    works identically regardless of the concrete type, so no caller-side
+    change is needed for this to be transparent. Combined preview is
+    capped at preview_limit total (not preview_limit per storage kind),
+    ordered the same way each source already orders its own rows
+    (most-recent-first) — cross-source interleaving beyond that is not
+    attempted, since the existing single-source order already isn't a
+    strict global time-sort guarantee for ROW_RECORDS files spanning
+    multiple DatasetFiles either.
+
+    Like get_matching_record_counts, the legacy SQL path runs
+    UNCONDITIONALLY — see that function's docstring for why "does this
+    dataset have a ROW_RECORDS-kind DatasetFile" is not a safe gate.
+    """
+    sql_preview, sql_matching, sql_total, sql_breakdown = await _get_filtered_records_sql(
+        db, dataset_id, f, preview_limit=preview_limit
+    )
+    all_preview: list = list(sql_preview)
+    matching_total = sql_matching
+    dataset_total = sql_total
+    quality_breakdown = {
+        "normal": sql_breakdown.get("normal", 0),
+        "caution": sql_breakdown.get("caution", 0),
+        "alert": sql_breakdown.get("alert", 0),
+    }
+
+    grouped = await _non_legacy_dataset_files(db, dataset_id)
+    for file in grouped.get(StorageKind.PARQUET.value, []):
+        from app.services import tabular_query_service
+
+        file_preview, file_matching, file_total, file_breakdown = await bounded_to_thread(
+            tabular_query_service.get_filtered_records, file, f, preview_limit=preview_limit
+        )
+        all_preview.extend(file_preview)
+        matching_total += file_matching
+        dataset_total += file_total
+        for key in quality_breakdown:
+            quality_breakdown[key] += file_breakdown.get(key, 0)
+
+    for file in grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+        from app.services import gridded_query_service
+
+        file_preview, file_matching, file_total, file_breakdown = await bounded_to_thread(
+            gridded_query_service.get_filtered_records, file, f, preview_limit=preview_limit
+        )
+        all_preview.extend(file_preview)
+        matching_total += file_matching
+        dataset_total += file_total
+        for key in quality_breakdown:
+            quality_breakdown[key] += file_breakdown.get(key, 0)
+
+    return all_preview[:preview_limit], matching_total, dataset_total, quality_breakdown

@@ -6,7 +6,7 @@ import structlog
 from sqlalchemy import select
 
 from app.core.database import get_sync_db
-from app.models.catalog import Dataset, DatasetFile
+from app.models.catalog import Dataset, DatasetFile, StorageKind
 from app.models.requests import AccessGrant, ExtractionStatus, SubsetExtraction
 from app.services.extractors import ExtractorError, bundle_as_zip, get_extractor_for_format
 from app.services.storage.keys import extract_key
@@ -98,14 +98,30 @@ def _run_extraction(db, extraction: SubsetExtraction) -> dict:
         results = []
 
         for i, dataset_file in enumerate(files):
-            storage = get_storage_backend(dataset_file.storage_backend)
-            source_key, source_bucket = _source_for_format(dataset_file, extractor.output_format)
-            body = storage.get(source_bucket, source_key)
+            is_zarr_csv_or_parquet = (
+                dataset_file.storage_kind == StorageKind.CHUNKED_ARRAY.value
+                and extractor.output_format in ("csv", "parquet")
+            )
+            if is_zarr_csv_or_parquet:
+                # PLAN.md Phase 5: a Zarr-backed file has no single
+                # processed_key object (only a processed_prefix
+                # multi-object layout) — _source_for_format can't resolve
+                # a downloadable input_path for it the way it does for
+                # PARQUET/RASTER files. Materialize the (already
+                # scope-filtered) Zarr store into a flat Parquet file
+                # first, then hand that to the SAME CsvExtractor/
+                # ParquetExtractor every other tabular source uses — no
+                # extractor-side duplication of scope_filter.py's logic.
+                local_input = _materialize_zarr_to_parquet(dataset_file, tmp_dir_path / f"input_{i}.parquet", scope)
+            else:
+                storage = get_storage_backend(dataset_file.storage_backend)
+                source_key, source_bucket = _source_for_format(dataset_file, extractor.output_format)
+                body = storage.get(source_bucket, source_key)
 
-            local_input = tmp_dir_path / f"input_{i}{Path(source_key).suffix}"
-            with open(local_input, "wb") as f:
-                while chunk := body.read(1024 * 1024):
-                    f.write(chunk)
+                local_input = tmp_dir_path / f"input_{i}{Path(source_key).suffix}"
+                with open(local_input, "wb") as f:
+                    while chunk := body.read(1024 * 1024):
+                        f.write(chunk)
 
             out_dir = tmp_dir_path / f"out_{i}"
             out_dir.mkdir(exist_ok=True)
@@ -133,7 +149,11 @@ def _source_for_format(dataset_file: DatasetFile, output_format: str) -> tuple[s
     """CSV/Parquet extraction reads the already-flattened processed
     Parquet (nothing lost for those formats); NetCDF/.mat extraction reads
     the RAW original file so N-D structure survives the filter — see the
-    module docstrings on NetcdfExtractor/MatExtractor for why."""
+    module docstrings on NetcdfExtractor/MatExtractor for why. Never
+    called for a CHUNKED_ARRAY file requesting csv/parquet output — that
+    case is routed to _materialize_zarr_to_parquet instead (see
+    _run_extraction), since such a file has no single processed_key
+    object to resolve here."""
     if output_format in ("csv", "parquet"):
         metadata = dataset_file.file_metadata or {}
         processed_key = metadata.get("processed_key")
@@ -141,3 +161,57 @@ def _source_for_format(dataset_file: DatasetFile, output_format: str) -> tuple[s
         if processed_key and processed_bucket:
             return processed_key, processed_bucket
     return dataset_file.storage_key, dataset_file.storage_bucket
+
+
+def _materialize_zarr_to_parquet(dataset_file: DatasetFile, output_path: Path, scope: dict) -> Path:
+    """PLAN.md Phase 5: opens a CHUNKED_ARRAY file's Zarr store (same
+    fsspec/s3fs chunk-range-read mechanism gridded_query_service.py's
+    query functions already use — see open_zarr_dataset), applies the
+    SAME scope filters NetcdfExtractor._filter uses (date range via
+    .sel(), bbox via .where(), parameter selection), then flattens the
+    result to a tidy DataFrame via to_dataframe() and writes it to a
+    local Parquet file — which CsvExtractor/ParquetExtractor then read
+    completely unmodified, exactly as they already do for a real
+    PARQUET-backed file's processed object. Filtering BEFORE flattening
+    (not after) is what keeps this from ever pulling an unfiltered whole
+    grid into memory for a large source."""
+    from app.services.gridded_query_service import open_zarr_dataset
+
+    with open_zarr_dataset(dataset_file) as ds:
+        lat_name = next((c for c in ("lat", "latitude", "y") if c in ds.coords), None)
+        lon_name = next((c for c in ("lon", "longitude", "x") if c in ds.coords), None)
+        time_name = "time" if "time" in ds.coords else None
+
+        if time_name is not None and (scope.get("date_from") or scope.get("date_to")):
+            lo = scope["date_from"] if scope.get("date_from") else ds[time_name].min().values
+            hi = scope["date_to"] if scope.get("date_to") else ds[time_name].max().values
+            ds = ds.sel({time_name: slice(lo, hi)})
+
+        bounds = scope.get("bounds")
+        if bounds:
+            mask = None
+            if lat_name is not None:
+                lat_mask = (ds[lat_name] >= bounds["lat_min"]) & (ds[lat_name] <= bounds["lat_max"])
+                mask = lat_mask if mask is None else mask & lat_mask
+            if lon_name is not None:
+                lon_mask = (ds[lon_name] >= bounds["lon_min"]) & (ds[lon_name] <= bounds["lon_max"])
+                mask = lon_mask if mask is None else mask & lon_mask
+            if mask is not None:
+                # .compute() first — xarray refuses boolean indexing with
+                # a dask-backed (lazy-chunked) mask against .where(...,
+                # drop=True); see gridded_query_service._apply_bbox's
+                # identical fix, found via the same live large-Zarr-file
+                # verification.
+                ds = ds.where(mask.compute(), drop=True)
+
+        parameters = scope.get("parameters") or ([scope["parameter"]] if scope.get("parameter") else None)
+        if parameters:
+            lowered = {str(p).lower() for p in parameters}
+            matching = [v for v in ds.data_vars if str(v).lower() in lowered]
+            if matching:
+                ds = ds[matching]
+
+        df = ds.to_dataframe().reset_index()
+
+    df.to_parquet(output_path, index=False)
+    return output_path

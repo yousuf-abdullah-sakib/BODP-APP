@@ -20,7 +20,15 @@ dependencies = [
     "email-validator>=2.2.0",
     "redis>=5.2.0",
     "celery>=5.4.0",
-    "boto3>=1.35.0",
+    # Upper-bounded to whatever botocore version s3fs/aiobotocore (below)
+    # actually supports — a plain >=1.35.0 resolves to a boto3/botocore
+    # newer than aiobotocore's pinned botocore range and pip silently
+    # installs an incompatible pair (confirmed hitting this during Phase 5
+    # implementation: pip installed botocore 1.43.56 for aiobotocore but
+    # left boto3 on 1.43.72, which requires botocore>=1.43.72 — a broken
+    # environment `pip check` correctly flagged). Re-verify/relax this
+    # bound whenever aiobotocore is upgraded.
+    "boto3>=1.35.0,<1.43.57",
     "slowapi>=0.1.9",
     "structlog>=24.4.0",
     "tenacity>=9.0.0",
@@ -42,6 +50,17 @@ dependencies = [
     "python-magic-bin>=0.4.14; platform_system=='Windows'",
     "python-magic>=0.4.27; platform_system!='Windows'",
     "nh3>=0.2.18",
+    # PLAN.md Phase 5 (Storage & Query Architecture): tabular_query_service.py
+    # queries Parquet directly from MinIO via DuckDB's httpfs/S3 extension
+    # (predicate pushdown, row-group pruning — verified empirically against
+    # this project's real MinIO before this was added, see PLAN.md's
+    # "Guiding decision" section for the measured results).
+    "duckdb>=1.1.0",
+    # gridded_query_service.py opens a Zarr store's multi-object MinIO
+    # prefix via xarray/zarr's fsspec-based S3 store support — fsspec
+    # itself is already present (via dask), s3fs is the S3 filesystem
+    # implementation fsspec needs and was not otherwise pulled in.
+    "s3fs>=2024.10.0",
 ]
 
 [project.optional-dependencies]

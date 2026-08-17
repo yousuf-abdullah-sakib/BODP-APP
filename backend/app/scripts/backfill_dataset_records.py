@@ -5,16 +5,28 @@ DatasetRecord rows written, because the real ingestion pipeline
 (app.worker.tasks.ingestion._run_ingestion) didn't insert them before this
 fix — it only updated dataset.record_count as a summary counter.
 
-This is a one-time data-repair tool, not part of the regular ingestion
-path. It does NOT re-run parsing from scratch: it re-parses the raw file
-(needed to recover the tidy Parquet shape / lat-lon-time column names)
-using the exact same parser the original ingestion used, then reuses
-_write_dataset_records — the same function future uploads now call inline.
+This is a one-time data-repair tool, predating PLAN.md Phase 5, and is not
+part of the regular ingestion path (and never will be again — Phase 5
+ingestion deliberately never writes DatasetRecord rows for any format).
+It does NOT re-run parsing from scratch: it re-parses the raw file (needed
+to recover the tidy Parquet shape / lat-lon-time column names) using the
+exact same parser the original ingestion used, then reuses
+_write_dataset_records — the same legacy COPY-writer function, kept only
+for this administrative repair path (see ingestion.py's own docstring for
+why it's no longer called from the live flow). _write_dataset_records
+stamps every row with this dataset_file's id (provenance) and deletes any
+pre-existing rows for that same dataset_file_id before writing — safe to
+re-run this script against the same file more than once.
 
 Only touches DatasetFile rows that:
   - have file_metadata set (ingestion genuinely completed), and
   - are tabular (never raster/GeoTIFF — pixel data is never turned into
     per-pixel DatasetRecord rows, by design), and
+  - have storage_kind='row_records' or unset/NULL (Phase 5: a file whose
+    storage_kind is already 'parquet'/'chunked_array' is Parquet/Zarr by
+    design, not "stuck at zero" — backfilling it into DatasetRecord rows
+    too would silently reintroduce the exact row-per-observation
+    duplication Phase 5 exists to eliminate), and
   - currently have zero DatasetRecord rows for their dataset.
 
 Usage:
@@ -53,6 +65,11 @@ async def _find_eligible_dataset_files(dataset_id: uuid.UUID | None) -> list[uui
             dataset_file = await db.get(DatasetFile, file_id)
             if dataset_file.file_metadata.get("shape") == DataShape.RASTER.value:
                 continue  # rasters never get DatasetRecord rows, by design
+            if dataset_file.storage_kind not in (None, "row_records"):
+                # PLAN.md Phase 5: this file is Parquet/Zarr-backed by
+                # design — zero DatasetRecord rows is correct, not a bug
+                # to repair.
+                continue
             existing = await db.scalar(
                 select(func.count(DatasetRecord.id)).where(
                     DatasetRecord.dataset_id == dataset_file.dataset_id

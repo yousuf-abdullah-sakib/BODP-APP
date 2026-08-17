@@ -17,20 +17,20 @@ import pandas as pd
 from pyproj import Transformer
 
 from app.core.config import settings
-from app.services.parsers.netcdf_parser import _TIME_CHUNK_SIZE, _ZARR_THRESHOLD_ELEMENTS
+from app.services.parsers.netcdf_parser import _TIME_CHUNK_SIZE
 
 __all__ = [
     "GriddedStructField",
     "find_gridded_struct_field",
     "TIME_CHUNK_SIZE",
-    "ZARR_THRESHOLD_ELEMENTS",
 ]
 
-# Re-exported under plain names for readability at call sites in
-# mat_parser.py — same values, same threshold, not a reimplementation
-# (Phase 2's netcdf_parser.py already settled both numbers).
+# Re-exported under a plain name for readability at call sites in
+# mat_parser.py — same value, not a reimplementation (netcdf_parser.py
+# already settled the chunk-axis size). Phase 5 removed the matching
+# ZARR_THRESHOLD_ELEMENTS re-export — gridded data always uses Zarr now,
+# regardless of size, so there is no threshold left to share.
 TIME_CHUNK_SIZE = _TIME_CHUNK_SIZE
-ZARR_THRESHOLD_ELEMENTS = _ZARR_THRESHOLD_ELEMENTS
 
 _COORD_NAME_HINTS = {
     "x": ("x", "lon", "longitude", "xcor", "easting"),

@@ -65,18 +65,17 @@ class TestProcessingProgress:
         assert "downloading" in stage_names
         assert "parsing" in stage_names
         assert "uploading_processed" in stage_names
-        assert "writing_records" in stage_names
+        # PLAN.md Phase 5: "writing_records" (the old per-chunk DatasetRecord
+        # COPY-writer stage) no longer runs for new ingestion — renamed to
+        # "writing_variable_registry", a single checkpoint after the
+        # DatasetVariable registry write, since no ingestion path writes
+        # DatasetRecord rows anymore for any format/shape.
+        assert "writing_variable_registry" in stage_names
 
         # downloading is always reported at 0% (the very first write, before
         # any real progress has happened yet).
         downloading_entries = [pct for s, pct in seen_stages if s == "downloading"]
         assert downloading_entries == [0]
-
-        # At least one writing_records entry has a real, non-null percentage
-        # derived from actual row progress within that stage.
-        writing_pcts = [pct for s, pct in seen_stages if s == "writing_records" and pct is not None]
-        assert len(writing_pcts) > 0
-        assert all(0 <= p <= 99 for p in writing_pcts)
 
     async def test_progress_pct_never_reported_as_100_before_completion(self, client, admin_headers):
         """The writing_records stage caps its reported percentage at 99 —

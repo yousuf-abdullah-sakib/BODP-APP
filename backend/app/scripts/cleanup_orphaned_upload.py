@@ -20,10 +20,10 @@ import argparse
 import asyncio
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 
 from app.core.database import AsyncSessionLocal
-from app.models.catalog import DatasetFile
+from app.models.catalog import DatasetFile, DatasetRecord
 from app.models.uploads import Upload, UploadStatus
 from app.services.storage.registry import get_storage_backend
 
@@ -53,6 +53,12 @@ async def cleanup_orphaned_upload(upload_id: uuid.UUID, *, dry_run: bool = True)
                 )
                 dataset_file = result.scalar_one_or_none()
 
+        dataset_record_count = 0
+        if dataset_file is not None:
+            dataset_record_count = await db.scalar(
+                select(func.count()).select_from(DatasetRecord).where(DatasetRecord.dataset_file_id == dataset_file.id)
+            )
+
         plan = {
             "upload_id": str(upload.id),
             "upload_status_before": upload.status,
@@ -60,6 +66,10 @@ async def cleanup_orphaned_upload(upload_id: uuid.UUID, *, dry_run: bool = True)
             "storage_key": dataset_file.storage_key if dataset_file else None,
             "storage_bucket": dataset_file.storage_bucket if dataset_file else None,
             "has_processed_artifact": bool(dataset_file and dataset_file.file_metadata),
+            # Rows this specific DatasetFile wrote via COPY before dying —
+            # provable by dataset_file_id, so safe to delete alongside it.
+            # Never derived from dataset_id (would risk other files' rows).
+            "dataset_records_to_delete": dataset_record_count or 0,
         }
 
         if dry_run:
@@ -79,6 +89,12 @@ async def cleanup_orphaned_upload(upload_id: uuid.UUID, *, dry_run: bool = True)
 
             storage = get_storage_backend(dataset_file.storage_backend)
             storage.delete(dataset_file.storage_bucket, dataset_file.storage_key)
+            # DatasetRecord.dataset_file_id has no ON DELETE CASCADE
+            # (deliberately — see its model docstring) — deleted
+            # explicitly here, scoped to this exact dataset_file_id only,
+            # before the DatasetFile row itself (which would otherwise
+            # raise IntegrityError if any rows still referenced it).
+            await db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_file_id == dataset_file.id))
             await db.delete(dataset_file)
 
         upload.status = UploadStatus.FAILED.value

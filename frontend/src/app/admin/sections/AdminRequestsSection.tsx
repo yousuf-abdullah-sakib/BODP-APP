@@ -27,9 +27,16 @@ function RequestFilterConfig({ request }: { request: RequestDetail }) {
     if (criteria.parameters && criteria.parameters.length > 0)
       parts.push(`Parameters: ${criteria.parameters.join(", ")}`);
     if (criteria.category) parts.push(`Category: ${criteria.category}`);
+    if (criteria.quality) parts.push(`Quality: ${criteria.quality}`);
     if (criteria.source) parts.push(`Source: ${criteria.source}`);
+    if (criteria.platform) parts.push(`Platform: ${criteria.platform}`);
+    if (criteria.station) parts.push(`Station: ${criteria.station}`);
+    if (criteria.format) parts.push(`Format: ${criteria.format}`);
+    if (criteria.processing_level) parts.push(`Processing Level: ${criteria.processing_level}`);
     if (criteria.date_from || criteria.date_to)
       parts.push(`Date: ${criteria.date_from || "—"} to ${criteria.date_to || "—"}`);
+    if (criteria.depth_min != null || criteria.depth_max != null)
+      parts.push(`Depth: ${criteria.depth_min ?? "—"}m to ${criteria.depth_max ?? "—"}m`);
     if (criteria.bounds) {
       parts.push(
         `Spatial: Lat ${criteria.bounds.lat_min.toFixed(2)}°–${criteria.bounds.lat_max.toFixed(2)}°, Lon ${criteria.bounds.lon_min.toFixed(2)}°–${criteria.bounds.lon_max.toFixed(2)}°`
@@ -38,18 +45,38 @@ function RequestFilterConfig({ request }: { request: RequestDetail }) {
     return parts;
   }
 
+  // Snapshot captured once at submission time (requests_service.
+  // create_request) — null means this request predates the snapshot
+  // mechanism, never fabricated as 0/0/0%.
+  const hasCoverage = request.matching_record_count !== null && request.dataset_total_record_count !== null;
+
   return (
     <div style={{ marginBottom: "1rem" }}>
       <div className="mini-label">Requested Filter Configuration</div>
       <div className="req-letter-box" style={{ fontSize: "0.78rem", marginBottom: "0.5rem" }}>
         {c && summarize(c).length > 0 ? summarize(c).join(" · ") : "No filters set — full dataset requested"}
       </div>
-      <div style={{ fontSize: "0.78rem", display: "flex", alignItems: "center", gap: "0.5rem" }}>
+      <div style={{ fontSize: "0.78rem", display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
         <b style={{ color: "var(--text-muted)" }}>Coverage:</b>
-        <span className="chip">{request.matching_percent}% of dataset</span>
-        <span style={{ color: "var(--text-muted)" }}>
-          ({request.matching_record_count.toLocaleString()} of {request.dataset_total_record_count.toLocaleString()} records)
-        </span>
+        {hasCoverage ? (
+          <>
+            <span className="chip">{request.matching_percent}% of dataset</span>
+            <span style={{ color: "var(--text-muted)" }}>
+              ({request.matching_record_count!.toLocaleString()} of {request.dataset_total_record_count!.toLocaleString()} records)
+            </span>
+            {request.is_stale && (
+              <span
+                className="chip"
+                title="The dataset's contents have changed since this request was submitted — these numbers may no longer be current."
+                style={{ color: "var(--amber, #b58900)" }}
+              >
+                ⚠ May be outdated
+              </span>
+            )}
+          </>
+        ) : (
+          <span style={{ color: "var(--text-muted)" }}>Not available (submitted before coverage tracking)</span>
+        )}
       </div>
     </div>
   );

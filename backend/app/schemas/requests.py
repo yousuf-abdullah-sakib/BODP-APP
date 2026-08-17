@@ -30,13 +30,28 @@ class SearchCriteriaSchema(BaseModel):
     parameters is a list, not a single value — zero selected means "all
     approved parameters" (no filtering), matching the checkbox multi-select
     UI on the dataset detail page. Also used, unchanged in shape, for
-    AccessGrant.scope and SubsetExtraction.requested_scope."""
+    AccessGrant.scope and SubsetExtraction.requested_scope.
+
+    Field set matches catalog_service.RecordsFilter exactly — before this,
+    quality/depth_min/depth_max/platform/station/format/processing_level
+    were tracked live in the catalog detail page's filter panel but were
+    silently dropped before a request was ever submitted (confirmed via
+    full-codebase trace), so a persisted "snapshot" of the user's filter
+    was never actually the complete filter. Extending this schema is a
+    prerequisite for a request-time snapshot to be meaningful at all."""
 
     category: str | None = None
     parameters: list[str] | None = None
+    quality: str | None = None
     source: str | None = None
+    platform: str | None = None
+    station: str | None = None
+    format: str | None = None
+    processing_level: str | None = None
     date_from: str | None = None
     date_to: str | None = None
+    depth_min: float | None = None
+    depth_max: float | None = None
     bounds: SpatialBoundsSchema | None = None
 
 
@@ -104,16 +119,27 @@ class RequestSummary(BaseModel):
 class RequestDetail(RequestSummary):
     """Adds requester identity plus dataset-coverage figures for the
     admin review queue — how much of the dataset the requester's own
-    search_criteria actually matches, computed once per list call so an
-    admin can judge scope at a glance without opening anything."""
+    search_criteria actually matched, AS OF WHEN THE REQUEST WAS
+    SUBMITTED (a stored snapshot, computed once in requests_service.
+    create_request — not recomputed on every admin page load; see
+    list_requests_for_admin's docstring for why that recomputation was
+    removed)."""
 
     user: RequestUserSummary
     # Defaults let RequestDetail.model_validate() build from a bare ORM
     # object (which has no such attributes); routers always overwrite
-    # these via model_copy(update=coverage) with real computed values.
-    matching_record_count: int = 0
-    dataset_total_record_count: int = 0
-    matching_percent: float = 0.0
+    # these via model_copy(update=coverage) with real values read from
+    # the stored snapshot. None means "this request predates the
+    # snapshot mechanism" — never fabricated as 0, which would read as
+    # a real (if unlikely) zero-match result rather than "unknown."
+    matching_record_count: int | None = None
+    dataset_total_record_count: int | None = None
+    matching_percent: float | None = None
+    # True when Dataset.version has moved on since this snapshot was
+    # captured — the dataset's actual contents may have changed
+    # (re-ingested, added to) since these numbers were computed, so an
+    # admin should treat them as approximate rather than current.
+    is_stale: bool = False
 
 
 class ApproveRequestBody(BaseModel):

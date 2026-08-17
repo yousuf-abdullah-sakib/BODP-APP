@@ -498,12 +498,7 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
       {showRequest && (
         <DatasetRequestModal
           dataset={dataset}
-          criteria={{
-            parameters: filters.parameters,
-            dateFrom: filters.dateFrom,
-            dateTo: filters.dateTo,
-            bounds: filters.bounds,
-          }}
+          criteria={filters}
           onClose={() => setShowRequest(false)}
           onSubmitted={() => setShowRequest(false)}
         />

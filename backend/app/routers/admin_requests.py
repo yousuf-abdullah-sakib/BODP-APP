@@ -76,7 +76,7 @@ async def reject_request(
         ip_address=get_client_ip(request),
     )
     send_request_rejected.delay(str(rejected.id))
-    coverage = await requests_service.get_request_coverage(db, rejected)
+    coverage = requests_service.read_request_coverage_snapshot(rejected)
     return _to_request_detail(rejected, coverage)
 
 

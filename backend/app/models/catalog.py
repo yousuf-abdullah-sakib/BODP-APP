@@ -22,6 +22,32 @@ class StorageBackend(StrEnum):
     CLOUD = "cloud"
 
 
+class StorageKind(StrEnum):
+    """How a DatasetFile's actual observation values are stored/queried
+    (PLAN.md Phase 5 — Storage & Query Architecture). This is the field
+    catalog_service.py/visualize_service.py/admin_qc_service.py branch on
+    to route a query to the right backend, replacing the old fragile
+    ".zarr.zip" processed_key suffix check.
+
+    ROW_RECORDS: legacy — data lives in DatasetRecord SQL rows. Every
+    DatasetFile ingested before Phase 5 effectively has this value
+    (backfilled best-effort, never fabricated as certain — see the
+    backfill_storage_kind.py script). New ingestion NEVER sets this.
+    PARQUET: tabular data in a Parquet file under processed/, queried via
+    DuckDB (tabular_query_service.py).
+    CHUNKED_ARRAY: gridded data in a Zarr store under processed/, queried
+    via xarray (gridded_query_service.py).
+    RASTER: GeoTIFF/COG — queried directly by URL, never through a
+    DatasetRecord-shaped filter/aggregate path at all (unchanged from
+    before this phase).
+    """
+
+    ROW_RECORDS = "row_records"
+    PARQUET = "parquet"
+    CHUNKED_ARRAY = "chunked_array"
+    RASTER = "raster"
+
+
 class QualityFlag(StrEnum):
     NORMAL = "normal"
     CAUTION = "caution"
@@ -76,6 +102,25 @@ class Dataset(UUIDPKMixin, TimestampMixin, Base):
     temporal_start: Mapped[date | None] = mapped_column(Date)
     temporal_end: Mapped[date | None] = mapped_column(Date)
     record_count: Mapped[int] = mapped_column(default=0, nullable=False)
+    # Bumped by ingestion (worker/tasks/ingestion.py's _run_ingestion) on
+    # every SUCCESSFUL, content-changing ingestion of a file into this
+    # dataset — NOT gated on record_count actually changing (a genuinely
+    # successful ingestion of a zero-content file, e.g. a header-only
+    # CSV, must still bump this; record_count's own truthiness was
+    # tried first and rejected as the gate for exactly that reason — see
+    # _run_ingestion's inline comment for the full reasoning). A failed
+    # or cancelled ingestion never reaches the code path that bumps this,
+    # so it stays correctly frozen for those. Lets a DatasetRequest
+    # snapshot (matching_record_count/dataset_total_record_count,
+    # captured once at request-submission time — see DatasetRequest.
+    # dataset_version below) be compared against the dataset's CURRENT
+    # version to detect staleness: if dataset.version has moved on since
+    # the request captured it, a real content-changing ingestion has
+    # happened since, and the snapshot numbers may no longer reflect the
+    # dataset's actual contents. Starts at 1 (not 0) so "version 1" means
+    # "as first ingested", matching DatasetFile.version's own 1-based
+    # convention.
+    version: Mapped[int] = mapped_column(default=1, nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
@@ -128,6 +173,12 @@ class DatasetFile(UUIDPKMixin, Base):
     uploaded_at: Mapped[date] = mapped_column(Date, server_default=None, nullable=True)
     # Auto-detected file metadata (variables, dimensions, columns) from Phase 2 parsers.
     file_metadata: Mapped[dict | None] = mapped_column(JSONB)
+    # Phase 5: how this file's actual data is stored/queried (StorageKind).
+    # Nullable — pre-Phase-5 files have no reliable provenance for this
+    # from before the column existed; backfilled best-effort (never
+    # fabricated as certain) by backfill_storage_kind.py. New ingestion
+    # always sets this explicitly from the parser's ParsedFileMetadata.shape.
+    storage_kind: Mapped[str | None] = mapped_column(String(20), index=True)
 
     dataset: Mapped["Dataset"] = relationship(back_populates="files")
 
@@ -139,6 +190,20 @@ class DatasetRecord(UUIDPKMixin, Base):
 
     dataset_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Provenance: which DatasetFile's ingestion wrote this row. Nullable —
+    # rows written before this column existed have no reconstructable
+    # provenance and are left NULL rather than fabricated. No ON DELETE
+    # clause (defaults to NO ACTION/RESTRICT): deleting a DatasetFile while
+    # DatasetRecords still reference it must fail loudly, not silently
+    # cascade-delete millions of rows. Every code path that deletes a
+    # DatasetFile explicitly deletes its DatasetRecords by this column
+    # first (see ingestion.py's _cleanup_cancelled_ingestion,
+    # dataset_multipart_upload_service.py, cleanup_orphaned_upload.py).
+    # Also what makes a retry of the same file idempotent: ingestion
+    # deletes any existing rows for this dataset_file_id before writing.
+    dataset_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dataset_files.id"), index=True
     )
     # Nullable (Phase 2): not every scientific dataset has every dimension —
     # a static spatial grid snapshot may have lat/lon with no time; a

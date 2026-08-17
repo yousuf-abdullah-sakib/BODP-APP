@@ -12,9 +12,24 @@ import {
 import type {
   DatasetSchemaDetail,
   DatasetSchemaReviewSummary,
+  StorageKind,
   VariableRole,
 } from "@/lib/types/admin-dataset-schema";
-import { VARIABLE_ROLE_LABELS } from "@/lib/types/admin-dataset-schema";
+import { STORAGE_KIND_LABELS, VARIABLE_ROLE_LABELS } from "@/lib/types/admin-dataset-schema";
+
+const STORAGE_KIND_BADGE_CLASS: Record<NonNullable<StorageKind>, string> = {
+  row_records: "badge-draft",
+  parquet: "badge-published",
+  chunked_array: "badge-published",
+  raster: "badge-published",
+};
+
+function StorageKindBadge({ kind }: { kind: StorageKind }) {
+  if (kind === null) {
+    return <span className="chip" title="Not yet backfilled — predates Phase 5's storage_kind tracking">Unknown</span>;
+  }
+  return <span className={`badge ${STORAGE_KIND_BADGE_CLASS[kind]}`}>{STORAGE_KIND_LABELS[kind]}</span>;
+}
 
 const ALL_ROLES = Object.keys(VARIABLE_ROLE_LABELS) as VariableRole[];
 
@@ -169,6 +184,34 @@ export default function AdminDatasetSchemaReviewSection() {
                     <p style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>Loading variables…</p>
                   ) : (
                     <>
+                      {detail.files.length > 0 && (
+                        <div style={{ marginBottom: "1rem" }}>
+                          <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.4rem" }}>
+                            Files &amp; storage
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+                            {detail.files.map((f) => (
+                              <div
+                                key={f.id}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  fontSize: "0.8rem",
+                                  padding: "0.4rem 0.6rem",
+                                  background: "var(--panel-alt-bg, rgba(0,0,0,0.03))",
+                                  borderRadius: "6px",
+                                }}
+                              >
+                                <span>
+                                  {f.file_name} <span className="chip">{f.file_format}</span>
+                                </span>
+                                <StorageKindBadge kind={f.storage_kind} />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       {detail.schema_reviewed_at && (
                         <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginBottom: "0.9rem" }}>
                           Reviewed by {detail.schema_reviewed_by_name ?? "unknown"} on{" "}

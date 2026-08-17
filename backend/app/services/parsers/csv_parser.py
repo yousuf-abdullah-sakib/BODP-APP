@@ -94,11 +94,13 @@ class CsvParser(FileParser):
 
     def to_processed(self, path: Path, output_dir: Path) -> ProcessedArtifact:
         output_path = output_dir / "processed.parquet"
+        sample = pd.read_csv(path, nrows=5)
+        time_col = _find_column(list(sample.columns), _TIME_ALIASES)
         try:
             row_count = 0
             writer = None
             for chunk in pd.read_csv(path, chunksize=100_000):
-                table = _chunk_to_arrow_table(chunk)
+                table = _chunk_to_arrow_table(chunk, time_col=time_col)
                 if writer is None:
                     import pyarrow.parquet as pq
 
@@ -121,7 +123,18 @@ class CsvParser(FileParser):
             raise ParserError(f"Failed to convert CSV to Parquet: {exc}") from exc
 
 
-def _chunk_to_arrow_table(chunk: pd.DataFrame):
+def _chunk_to_arrow_table(chunk: pd.DataFrame, *, time_col: str | None):
     import pyarrow as pa
 
+    # PLAN.md Phase 5: the Parquet output must carry a real temporal dtype
+    # for its time column, not a raw string — tabular_query_service's
+    # DuckDB queries (date_trunc, date-range WHERE clauses) require an
+    # actual DATE/TIMESTAMP column, matching what parse()'s own metadata
+    # extraction already coerces via pd.to_datetime for the SAME column.
+    # Unparseable cells become NaT (skipped downstream, same as the
+    # legacy per-row writer's _resolve_row_time()/_is_finite_number()
+    # skip), not a hard failure — one bad row shouldn't fail the file.
+    if time_col and time_col in chunk.columns:
+        chunk = chunk.copy()
+        chunk[time_col] = pd.to_datetime(chunk[time_col], errors="coerce")
     return pa.Table.from_pandas(chunk, preserve_index=False)

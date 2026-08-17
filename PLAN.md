@@ -729,6 +729,505 @@ before this phase can ship.
 
 ---
 
+## Phase 5 — Storage & Query Architecture (No New Data Rows in PostgreSQL)
+
+**Status: RESCOPED.** An earlier, narrower version of this phase (hybrid:
+gridded data → Zarr, tabular data stays on `DatasetRecord`) was written,
+then explicitly superseded after further discussion. This version
+replaces it entirely — PostgreSQL stops being a data store for *any*
+newly-ingested observation values, tabular or gridded.
+
+### Objective
+The real target, stated directly: **PostgreSQL should manage the data,
+but MinIO should store the data.** Every uploaded file's actual
+observation values — regardless of format — live in MinIO as a
+columnar/chunked artifact (Parquet for tabular, Zarr for gridded, COG
+for raster, all already true today for raster and partly true for
+gridded). PostgreSQL holds only what's genuinely relational: dataset
+metadata, `DatasetVariable` schema, permissions, requests/grants,
+catalog listings, audit — never a row-per-observation table again for
+new data. Filtering and visualization query the MinIO-resident files
+directly through a real columnar query engine (DuckDB for Parquet,
+`xarray`/Zarr for gridded) with predicate pushdown, not by loading a
+file and filtering it in Python, and not by pre-flattening it into SQL
+rows.
+
+This supersedes the narrower Phase 5 draft's premise that "sparse/
+tabular data is correctly served by `DatasetRecord` today" — it is
+*functionally* correct today, but it doesn't belong in the target
+architecture either: `DatasetRecord`'s existence at all is what let a
+5MB gridded file's shape mismatch go unnoticed as "just a scale
+problem," and keeping large tabular ingestion on the same row-per-
+observation model preserves the identical failure mode for a large CSV
+(a 12M-row station-observation file is just as real a possibility as a
+12M-element grid). Removing the row-per-observation path for *all* new
+ingestion removes the size judgment call entirely, for every format.
+
+### Explicit correction from the narrower draft, and why
+The narrower Phase 5 kept `DatasetRecord`+the COPY-based bulk writer
+(`_write_dataset_records`, `_COPY_CHUNK_ROWS`, benchmarked at ~12,000–
+13,700 rows/sec) as "the correct mechanism" for tabular data. That
+framing is dropped here: the COPY writer is fast at what it does, but
+what it does — turn every observation into an indexed SQL row — is
+exactly the model this rescoped plan moves away from, for tabular data
+too. The writer and its whole test/benchmark suite become **legacy-path
+support only** (kept working for existing data, not extended or reused
+for new ingestion) — see "What happens to the existing COPY writer"
+below.
+
+### Guiding decision — verified, not just planned
+**DuckDB reading Parquet directly from MinIO, with genuine predicate
+pushdown, was empirically tested against this project's real dev-stack
+MinIO before this plan was written** (not merely reasoned about from
+documentation):
+- A 1.875MB / 100,000-row Parquet file was uploaded to the real
+  `bodp-vps` MinIO bucket via the same path-style S3 addressing the
+  existing `S3CompatibleBackend` already uses.
+- DuckDB (`httpfs` extension), configured with the exact same four
+  config values `storage/registry.py` already resolves (endpoint,
+  access key, secret key, region) plus `s3_url_style='path'`, queried it
+  successfully: `SELECT COUNT(*) ... WHERE parameter='Salinity'` returned
+  in ~31ms; a `GROUP BY` aggregate in ~37ms.
+- `EXPLAIN ANALYZE` on the filtered query showed **`in: 40.9 KiB`
+  transferred, 2 GET requests total, `Filters: parameter='Salinity'`
+  pushed directly into the Parquet `TABLE_SCAN`** — i.e., roughly 2% of
+  the file's bytes were fetched to answer the query, confirming real
+  HTTP-range-based row-group pruning against MinIO, not a full-file
+  download.
+- A 3-file glob (`read_parquet('s3://bucket/prefix/*.parquet')`)
+  correctly unioned all three files into one 3,000-row result — the
+  mechanism multi-`DatasetFile` datasets need (`Dataset`→`DatasetFile`
+  is one-to-many, confirmed in `catalog.py:93-111`).
+- DuckDB's `spatial` extension's `ST_Intersects(ST_Point(...),
+  ST_MakeEnvelope(...))` was confirmed callable and returns correct
+  results — a direct, near-1:1 replacement for `catalog_service.py:356`/
+  `visualize_service.py:97`'s existing `func.ST_Intersects(DatasetRecord.
+  geom, envelope)` PostGIS calls, preserving the polygon-AOI-readiness
+  the current code's own comment explains was the deliberate reason
+  `ST_Intersects` was chosen over a plain BETWEEN range filter.
+
+**What was explicitly NOT verified, and must be benchmarked before any
+concurrency claim is made** — flagged per direct feedback that
+"well-trodden" is not the same as a production guarantee:
+- DuckDB's actual behavior under 400–500 *concurrent* connections/queries
+  against this deployment's real CPU/RAM/network — connection/process
+  model, sustainable query rate, and whether concurrent large scans
+  compete for the same MinIO bandwidth in a way that degrades latency.
+- Real-world row-group pruning effectiveness depends on how each Parquet
+  file is written (row-group size, whether relevant columns carry
+  min/max stats) — the empirical test above used pyarrow's default
+  writer settings; production ingestion's actual writer configuration
+  must be checked to produce Parquet files that get the same pruning
+  benefit, not assumed automatically true for every file.
+- MinIO's own throughput ceiling under many simultaneous GET/HEAD
+  requests from many concurrent DuckDB queries.
+- Whether a connection-pooled/cached DuckDB process model (e.g. one
+  long-lived DuckDB connection per worker, reused across requests) or a
+  fresh connection per request is the right operational shape — this is
+  an implementation decision requiring its own benchmark, not assumed.
+
+**This phase's testing requirements (below) include a dedicated
+concurrency benchmark section specifically because of this — no claim
+about safe concurrent user counts ships without a number behind it.**
+
+### What happens to existing `DatasetRecord` data — explicit, non-destructive
+**Existing `DatasetRecord` rows are never deleted, migrated, or
+touched by this phase.** The two architectures run in parallel:
+- Every `DatasetFile` ingested **before** this phase's rollout keeps
+  being served by the existing `DatasetRecord`/`catalog_service.py`/
+  `visualize_service.py` SQL-query path, completely unchanged — an old
+  dataset's filter/Visualize behavior does not change at all.
+- Every `DatasetFile` ingested **after** rollout uses the new Parquet/
+  Zarr/DuckDB/`xarray` path exclusively — it never gets a
+  `DatasetRecord` row written for it in the first place.
+- A dataset that later gets a *second* file uploaded post-rollout could
+  therefore have some files on the old path and some on the new path
+  simultaneously — `catalog_service.py`'s query functions must combine
+  both sources' results for such a dataset (union the SQL-sourced rows
+  and the DuckDB-sourced rows), not silently drop one. This mixed-state
+  case is explicitly called out as a required test scenario, not an
+  edge case to discover later.
+- A future, separate, explicitly-approved phase can decide whether/how
+  to retire `DatasetRecord` for old data (e.g. backfilling old raw files
+  into Parquet and dropping the SQL rows) — **not decided or scheduled
+  here.** This phase's job is only to stop the bleeding for new
+  ingestion and prove the new path works; retiring old data is a
+  distinct decision with its own risk profile (verifying byte-identical
+  re-derivation of old data, downtime/consistency during cutover, etc.)
+  that deserves its own dedicated plan when it's actually proposed.
+
+### Exact features included
+
+**1. Parsers write Parquet (tabular) or Zarr (gridded) to `processed/`
+— same artifacts already produced today, but they become the primary
+data, not an intermediate step toward `DatasetRecord`.**
+`csv_parser.py`/`netcdf_parser.py`/`mat_parser.py` already write these
+formats in `to_processed()` — this phase's parser-level change is
+narrow: `netcdf_parser.py`/`mat_parser.py`'s existing 50,000,000-element
+Zarr-vs-Parquet size threshold is replaced by a shape check (any
+confirmed regular grid → Zarr, always, regardless of size — the same
+"shape not size" correction already agreed for gridded data specifically
+applies here as the general rule for every format). GeoTIFF's COG
+output is unchanged (already correct, already the only format never
+touching `DatasetRecord`).
+
+**2. Zarr's storage layout changes from one zipped object to
+one-object-per-chunk, exactly as previously planned** — `StorageService.
+get()` has no `Range` support, so a single `processed.zarr.zip` object
+requires a full download to read at all, defeating chunked storage's
+purpose. New layout: `processed/{dataset_id}/{file_id}.zarr/...` (many
+small chunk + metadata objects under a shared prefix, matching `zarr`'s
+own native directory-store convention and the standard `fsspec`/`s3fs`-
+on-S3 pattern), read via `xr.open_zarr` through `fsspec`'s S3 support
+talking to MinIO directly with the same credentials `registry.py`
+already resolves.
+
+**3. No new `DatasetRecord` rows are ever written by new ingestion, for
+any format.** `ingestion.py`'s `_write_dataset_records` call is removed
+from `_run_ingestion`'s normal flow entirely (not conditionally skipped
+— structurally absent from the new-ingestion path). The function itself,
+its COPY writer, and its whole test suite remain in the codebase,
+untouched, because they must keep working for whatever administrative
+action might still reference them (e.g. `backfill_dataset_records.py`
+remains valid for repairing pre-existing data) — but nothing in the live
+upload/bulk-import/ingestion flow calls it anymore.
+
+**4. `DatasetFile.storage_kind` becomes the persisted routing fact**
+(`row_records` | `parquet` | `chunked_array` | `raster`) — `row_records`
+is the value every pre-Phase-5 file effectively has (backfilled via a
+one-time best-effort script from existing `file_metadata`, matching the
+provenance-discipline already established this session — never
+fabricated as certain), `parquet`/`chunked_array`/`raster` are what new
+ingestion sets going forward. This is the field the query router (item
+5) branches on.
+
+**5. `catalog_service.py`/`visualize_service.py` gain a routing layer
+in front of their existing query functions, not a rewrite of them.**
+New `backend/app/services/tabular_query_service.py` (DuckDB-backed,
+Parquet) and (from the earlier draft, unchanged in shape)
+`gridded_query_service.py` (`xarray`/Zarr-backed) — each dataset's
+`DatasetFile` rows are grouped by `storage_kind`; `row_records` files
+query `DatasetRecord` exactly as today (existing code, unmodified);
+`parquet` files query via `tabular_query_service`; `chunked_array` files
+query via `gridded_query_service`; results from however many groups a
+given dataset actually has are combined into one response matching
+today's existing `get_filtered_records`/Visualize response shapes
+exactly, so no frontend contract changes. This is genuinely additive —
+every line of `_apply_record_filters`/`RecordsFilter`/the five Visualize
+query functions keeps working unmodified for `row_records`-backed data.
+
+**6. `tabular_query_service.py`'s DuckDB layer translates
+`RecordsFilter`/`VizFilterParams` into SQL against `read_parquet(glob)`**
+— parameter/date-range/quality/source/platform/station equality-or-range
+predicates map directly to `WHERE` clauses; the spatial bbox filter uses
+DuckDB's `spatial` extension's `ST_Intersects`/`ST_MakeEnvelope`
+(verified above), preserving the existing polygon-AOI-readiness. One
+DuckDB connection (or a small pool) per worker process, reused across
+requests rather than opened fresh per query — exact pooling strategy is
+an implementation-time decision informed by the concurrency benchmark
+(testing requirements below), not pre-committed here.
+
+**7. Admin QC scanning's blind spot is addressed explicitly, not
+silently left broken.** `admin_qc_service.py`'s three detectors
+(duplicate/outlier/missing-values) query `DatasetRecord` exclusively
+today — confirmed in the codebase survey that this already produces a
+blind spot for any Zarr-backed gridded data (pre-existing, silent), and
+this phase would otherwise silently extend that blind spot to *all* new
+tabular data too, since new tabular files never get `DatasetRecord`
+rows either. This phase adds DuckDB-Parquet equivalents of the same
+three checks (duplicate `(time, station_id, parameter)` groups,
+3σ outlier counts, declared-vs-actual row count) for `parquet`-backed
+files, run by the same `run_qc_scan` orchestration, writing the same
+`QualityIssue` rows — so QC coverage does not silently regress for new
+data. This was not part of the narrower draft and is called out
+specifically because it was found to be a real, unaddressed gap during
+research for this rescoped plan.
+
+**8. Admin Dashboard gains the per-file visibility item from the
+earlier draft, extended with the new storage kinds** — per-dataset file
+list (new, since none exists today) showing each file's format,
+`storage_kind` badge ("📊 SQL Records (legacy)" / "📦 Parquet" / "🗂️
+Chunked Array" / "🖼️ Raster/COG"), record/row count, and ingestion
+status.
+
+**9. Upload UI still makes no new admin-facing storage choice** — same
+as the earlier draft's decision, unchanged: routing is fully automatic
+from detected file shape; the per-file badge (item 8) is where the
+automatic decision becomes visible after the fact.
+
+### Backend changes
+- `backend/app/services/parsers/base.py` — `DataShape.GRIDDED` added
+  (as in the earlier draft); size-threshold constants removed from
+  `netcdf_parser.py`/`mat_parser.py`, replaced by shape-based branching.
+- `backend/app/services/parsers/netcdf_parser.py`,
+  `mat_parser.py`, `mat_gridded_struct.py` — as described in the earlier
+  draft's items 1-2, still needed: `parse()` sets `shape` explicitly;
+  `_to_zarr()`/`_gridded_to_zarr()` rewritten for one-object-per-chunk
+  layout.
+- `backend/app/services/storage/keys.py` — new `processed_prefix()`.
+- `backend/app/models/catalog.py` — `StorageKind` enum (now 4 values,
+  not 3); `DatasetFile.storage_kind` column.
+- `backend/alembic/versions/` — new migration: nullable `storage_kind`
+  column + supporting index.
+- `backend/app/worker/tasks/ingestion.py` — `_run_ingestion` sets
+  `dataset_file.storage_kind`; the `_write_dataset_records` call is
+  removed from the normal ingestion flow (not just conditionally
+  skipped); `_write_variable_registry` gains a DuckDB-based numeric-
+  range/distinct-value computation path for `parquet`-backed files
+  (today it reads Parquet row-group stats directly via `pyarrow` for
+  this — confirm whether that existing logic already works unmodified
+  against the new artifacts, since it doesn't depend on `DatasetRecord`
+  at all, only on the Parquet file itself; likely no change needed here,
+  to be confirmed during implementation).
+- **New** `backend/app/services/tabular_query_service.py` — DuckDB-based
+  Parquet query layer (item 6).
+- **New** `backend/app/services/gridded_query_service.py` — unchanged
+  from the earlier draft (Zarr query layer).
+- `backend/app/services/catalog_service.py`,
+  `backend/app/services/visualize_service.py`,
+  `backend/app/worker/tasks/visualize.py` (the sync-session duplicate of
+  `get_spatial_points` used by the async spatial-interpolation Celery
+  task — confirmed a second, independent copy of the same query logic
+  that needs the identical routing treatment) — routing-layer additions
+  as described in item 5.
+- `backend/app/services/requests_service.py` — `get_coverage_for_request`
+  already calls `catalog_service.get_matching_record_counts`, which
+  gains the routing layer transparently; no direct change expected here,
+  to be confirmed.
+- `backend/app/services/admin_qc_service.py` — new DuckDB-Parquet
+  detector implementations (item 7), dispatched alongside the existing
+  `DatasetRecord`-based ones by `storage_kind`.
+- `backend/app/services/admin_dataset_schema_service.py` — include
+  `storage_kind` per file in the schema-review response.
+- `backend/app/worker/tasks/extraction.py`, `backend/app/services/
+  extractors/` — new Zarr-aware extractor (confirmed required, not
+  optional — see Definition of Done): `_source_for_format()` gains a
+  branch for `storage_kind=chunked_array` sources, opening the Zarr
+  store via `xarray` instead of resolving one `processed_key`/
+  `storage_key` object; a new `ZarrExtractor` (or equivalent) applying
+  the same scope-filter semantics `scope_filter.py` already implements
+  for tabular sources, registered in `extractors/registry.py` alongside
+  the existing four.
+- `backend/pyproject.toml` — add `duckdb` (verified installable via
+  standard PyPI manylinux wheels into the existing `python:3.12-slim`
+  Docker images with no new system libraries required — confirmed by
+  installing and running it against this project's real backend
+  container during research for this plan) and its `spatial`/`httpfs`
+  extensions (auto-installed by DuckDB at first `INSTALL`/`LOAD` call,
+  or pre-baked into the Docker image for faster cold starts — decided
+  during implementation). Add `fsspec`+`s3fs` for the Zarr read path (or
+  confirm `zarr`'s existing dependency tree already covers it — verify
+  before adding).
+
+### Frontend changes
+- `frontend/src/app/admin/sections/AdminDatasetsSection.tsx` — new
+  per-dataset file list with `storage_kind` badge (item 8).
+- `frontend/src/app/admin/sections/AdminDatasetSchemaReviewSection.tsx`
+  — read-only storage-kind indicator per file.
+- `frontend/src/lib/types/catalog.ts`, `admin-datasets.ts` — new
+  `storage_kind` field threaded through existing types.
+- No change to the dataset-detail catalog filter UI, Visualize UI, or
+  their underlying response-shape contracts — confirmed in the codebase
+  survey that these are already storage-backend-agnostic on the frontend
+  side; the routing happens entirely server-side.
+
+### Database/migration changes
+- `dataset_files.storage_kind` (new, nullable `VARCHAR`) + supporting
+  index.
+- One-time backfill script (`backend/app/scripts/backfill_storage_kind.py`)
+  — labels existing files `row_records`/`chunked_array`/`raster` by
+  best-effort inference from existing `file_metadata`, dry-run by
+  default, matching existing script conventions. Writes no new data,
+  labels only — `DatasetRecord` rows are never touched by this script.
+- **No migration ever deletes or transforms `DatasetRecord` rows** —
+  reiterated because it's the single most important non-negotiable
+  constraint of this phase, given direct instruction not to destroy
+  existing data.
+
+### Storage/MinIO changes
+- New multi-object Zarr layout (as in the earlier draft).
+- New Parquet artifacts under `processed/{dataset_id}/{file_id}.parquet`
+  (already the existing convention for tabular `to_processed()` output —
+  no new layout needed here, confirmed these already work correctly
+  with DuckDB's glob-based multi-file reads per the empirical
+  verification above).
+- Existing `raw/` layout, multipart upload, presigned URLs — unchanged.
+
+### Testing requirements
+- **Concurrency/load benchmark (new, required before any production
+  claim)**: DuckDB query throughput/latency against real Parquet files
+  in MinIO under simulated concurrent load (start at 50, then 200, then
+  400-500 simulated concurrent filter/Visualize requests), measuring
+  p50/p95/p99 latency, MinIO request rate, and backend CPU/RAM — this is
+  the test that turns "should be fine" into an actual number. No claim
+  about safe concurrent-user counts is made in this phase's final report
+  without this benchmark's real results attached.
+- Parquet-writer row-group configuration check — confirm production
+  `to_processed()` Parquet output actually gets meaningful row-group
+  pruning benefit (not just column-projection benefit) under realistic
+  filter patterns, tuning row-group size if the default doesn't deliver
+  it.
+- Mixed-storage-kind dataset test: a `Dataset` with one `row_records`
+  file and one `parquet` file, confirming `get_filtered_records`
+  correctly unions both sources' results rather than dropping either.
+- DuckDB spatial-filter regression test, directly comparable to the
+  existing `test_catalog.py:408-448`
+  `test_records_spatial_filter_matches_manual_bbox_subset` (which
+  cross-checks the API against an independent manual PostGIS query) —
+  new test cross-checks the DuckDB path against the same manual query,
+  proving bbox-filter parity between the two backends.
+- New QC-detector tests for the DuckDB-Parquet path (duplicate/outlier/
+  missing-values), directly parallel to existing `test_admin_qc.py`'s
+  `_seed_dataset_with_anomalies`-based assertions.
+- Existing test files needing direct attention (per the research
+  survey): `test_dataset_upload.py`'s `test_upload_populates_dataset_
+  records`/`test_upload_timeless_csv_still_populates_records` (currently
+  assert new CSV uploads produce `DatasetRecord` rows — these assertions
+  describe *legacy-path* behavior post-Phase-5 and need a new-path
+  equivalent asserting the same file now produces a queryable Parquet
+  artifact with zero `DatasetRecord` rows instead); `test_admin_bulk_
+  import.py`/`test_bulk_import.py` (assert bulk-imported files produce
+  identical `DatasetRecord` results to single-file upload — same
+  reframing needed); `test_dataset_variables.py`'s Zarr-backed-upload-
+  produces-no-records test (already correctly asserts zero
+  `DatasetRecord` rows for gridded data — extends unchanged, now joined
+  by an equivalent assertion for `parquet`-backed tabular data).
+- `test_dataset_record_writer.py`/`test_ingestion_benchmark.py`/
+  `test_backfill_dataset_records.py` — kept exactly as-is, reframed only
+  in their docstrings as testing the **legacy/administrative path**, not
+  the primary ingestion path.
+- Full existing backend suite must stay green for every file/test not
+  listed above — `DatasetVariable`/schema-review/permission tests are
+  storage-layer-agnostic and unaffected (confirmed in the survey).
+- Live verification: re-ingest a real CSV file and a real gridded `.mat`
+  file (e.g. `january_instantaneous.mat`) end-to-end post-rollout,
+  confirm both get correct `storage_kind` values, zero `DatasetRecord`
+  rows for either, correct catalog-filter and Visualize results for
+  both, and confirm an existing pre-rollout dataset's filtering/
+  Visualize behavior is byte-identical to before this phase shipped.
+
+### Rollback/recovery
+Highest-blast-radius items: (a) the Zarr storage-layout change (as in
+the earlier draft — implement and test fully before any parser starts
+writing it), and (b) removing `_write_dataset_records` from the live
+ingestion flow (the single line of change with the largest behavioral
+consequence in this whole phase — recommend landing and fully verifying
+the DuckDB/Parquet query path FIRST, with `_write_dataset_records` still
+also running in parallel as a temporary safety net for one verification
+cycle, before actually removing the call — so a query-layer bug is
+caught by comparing old-path and new-path results side by side rather
+than discovered after the fallback no longer exists). No existing
+`DatasetRecord` data is deleted or transformed at any point in this
+phase, under any circumstance — pre-rollout data's query path is
+entirely untouched code.
+
+### What must NOT change in this phase
+- Any existing `DatasetRecord` row, or the query behavior for any
+  dataset ingested before this phase's rollout.
+- `DatasetVariable`/schema review's role-assignment workflow — this
+  phase only adds a read-only storage-kind field to its response.
+- The CSV/NetCDF/.mat extractors' existing behavior for `row_records`-
+  and raw-file-backed sources (`csv_extractor.py`/`netcdf_extractor.py`/
+  `mat_extractor.py`/`parquet_extractor.py`, `scope_filter.py`) —
+  unmodified for anything they already handle correctly today.
+  **Correction from an earlier draft of this phase**: extraction is
+  *not* uniformly unaffected — it never depended on `DatasetRecord`
+  (true), but it does depend on `extraction.py`'s `_source_for_format()`
+  resolving a single storage object, which a Zarr-backed source breaks;
+  building a Zarr-aware extraction path is real in-scope work for
+  this phase (see Definition of Done).
+- The admin's upload flow itself (file picker, progress display,
+  cancellation, minimize/background tracking) — no new pre-upload
+  choice; routing stays fully automatic.
+- GeoTIFF/raster handling — already correct, out of scope.
+- Any decision about retiring/migrating existing `DatasetRecord`
+  data — explicitly deferred to a future, separate, explicitly-approved
+  phase, not part of this one.
+
+### Definition of done — explicit, non-negotiable
+**This phase is NOT complete merely because new ingestion stops writing
+`DatasetRecord` rows.** That's a necessary precondition, not the
+deliverable. The deliverable is: CSV, NetCDF, and MAT actual data reside
+entirely in MinIO for every newly-ingested file, and every consumer of
+that data — catalog filtering, Visualize, QC, and subset extraction/
+download — genuinely works correctly against the new Parquet/Zarr
+storage path, including for datasets that mix old (`DatasetRecord`) and
+new (Parquet/Zarr) files. None of the items below is optional or
+deferrable to "a later pass" within this phase; a phase-completion
+report that checks only "no new SQL rows" against this list is
+incomplete.
+
+Every item below must be independently, live-verified — not inferred
+from the mechanism being "structurally similar" to something that
+already worked:
+
+- [ ] **CSV**: a newly uploaded CSV file's data is stored only as
+  Parquet in MinIO (zero `DatasetRecord` rows), and its catalog-detail
+  filters (parameter/date/quality/source/platform/station/spatial bbox)
+  return results verified equivalent to the legacy row-per-observation
+  path on the same source data.
+- [ ] **NetCDF**: same, for a genuinely gridded NetCDF file (Zarr) and,
+  separately, a non-gridded/tabular-shaped NetCDF file (Parquet) — both
+  shapes must be verified, not just one.
+- [ ] **MAT**: same, for both a flat/tabular `.mat` file (Parquet) and a
+  gridded `.mat` struct (Zarr) — including the real
+  `january_instantaneous.mat` reference file specifically, end-to-end.
+- [ ] **Catalog filtering** works correctly against Parquet (DuckDB) and
+  Zarr (`xarray`) for every filter type the UI exposes today — not just
+  a single smoke-tested predicate.
+- [ ] **Visualization** (time series, spatial, comparison, statistics —
+  all four modules) produces correct results against both new storage
+  kinds, verified against hand-computable expected values the same way
+  `test_visualize.py`'s existing fixtures already do.
+- [ ] **QC scanning** (duplicate/outlier/missing-values, all three
+  detectors) runs correctly against Parquet-backed data — confirmed
+  finding real, seeded anomalies, not merely confirmed to not crash.
+- [ ] **Subset extraction/download** is explicitly re-verified end-to-end
+  against the new path, not assumed safe because it structurally reads
+  raw files rather than `DatasetRecord`. **Confirmed during planning
+  that a real gap exists here**, contradicting the earlier draft's
+  "structurally unaffected" framing: `extraction.py`'s `_source_for_
+  format()` resolves the extraction source as either one single-object
+  `processed_key` (CSV/Parquet output formats) or the one raw
+  `storage_key` (NetCDF/.mat output formats) — neither shape works for a
+  Zarr-backed source, which has no single `processed_key` object at all
+  (a multi-object prefix, per item 2's storage-layout change). This
+  phase must therefore **build a Zarr-aware extraction path** (open the
+  Zarr store via `xarray`, apply the same scope-filter semantics
+  `scope_filter.py` already implements for the tabular extractors, write
+  the requested output format) as real, in-scope work — not a
+  discovered gap to defer. Verified: exporting a filtered CSV/Parquet
+  subset from a Parquet-backed dataset produces correct output, AND
+  exporting a filtered subset (any supported output format) from a
+  Zarr-backed gridded dataset produces correct output via the new
+  extraction path.
+- [ ] **Mixed-storage-kind datasets**: a `Dataset` with at least one
+  legacy `row_records` file and at least one new `parquet`/
+  `chunked_array` file, verified correct (not just "does not error") for
+  every one of the above — catalog filtering, Visualization, QC, and
+  extraction all correctly combine/reflect both sources.
+- [ ] **A pre-existing, untouched dataset's** catalog/Visualize/QC/
+  extraction behavior is verified byte-identical to before this phase
+  shipped — a regression here fails the phase regardless of how well
+  the new path works.
+- [ ] **Admin Dashboard** shows, per file, how it's stored and processed
+  (`storage_kind` badge), live-verified in the browser, not just present
+  in an API response.
+- [ ] **The 400–500 concurrent-user benchmark** has been run against
+  real infrastructure and its actual measured numbers (p50/p95/p99
+  latency, MinIO request rate, CPU/RAM under load) are recorded in the
+  phase's completion report. A phase report that asserts concurrency
+  safety without these numbers attached does not satisfy this
+  criterion — measurement is mandatory, not optional evidence.
+- [ ] **No `DatasetRecord` row is deleted, migrated, or altered**
+  anywhere in this phase, verified by row-count comparison before/after.
+
+A phase-completion report must address every checkbox above explicitly
+(pass/fail/not-applicable-with-reason) — silence on any item is treated
+as not done, not as "presumably fine."
+
+---
+
 ## 4. Cross-cutting requirements (apply to every phase)
 
 - **Requirement 22, 23, 24** (preserve Phase 1–9, small uploads, and the
@@ -757,5 +1256,6 @@ before this phase can ship.
 | 2 | Large-File Processing, Automatic Variable Detection & Schema Registry | Phase 1 (bulk import reuses its put/multipart logic; cancellation checkpoints assumed present) | `dataset_records` 3 columns nullable, new `dataset_variables` table (detected variables, unreviewed) | NetCDF Dask chunk-axis correctness at scale |
 | 3 | Admin Schema Review & Variable Role Assignment | Phase 2 (`dataset_variables` rows must already be detected/persisted) | `dataset_variables.role(s)`, review-state tracking | New permission scoping/UX consistency |
 | 4 | Dynamic Filtering & Visualization | Phase 3 (needs approved roles to gate on) | none anticipated | Visualize rewrite blast radius (622-line file, 6+ call sites) |
+| 5 | Storage & Query Architecture (No New Data Rows in PostgreSQL) | Phase 2/4 (extends the same parsers and query layer; needs `DatasetVariable`/schema-review's existing UI to attach the new read-only indicator to) | `dataset_files.storage_kind` (nullable) | Removing `_write_dataset_records` from the live ingestion flow without a verified-equivalent DuckDB/Zarr query path already proven correct first; unverified concurrency behavior at 400-500 users |
 
-**No phase has been implemented. This file is the plan only.**
+**Phases 1–4 and the gridded-MATLAB-struct extension of Phase 2 are implemented (see commit history). Phase 5 is planning only — not yet implemented — pending explicit approval to begin. Phase 5 was rescoped once (see its own "Status: RESCOPED" note) from a narrower gridded-data-only version to the current no-new-`DatasetRecord`-rows-at-all version; the narrower version was never implemented.**

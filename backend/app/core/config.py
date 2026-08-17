@@ -30,8 +30,24 @@ class Settings(BaseSettings):
         default="postgresql+psycopg://bodp:bodp@localhost:5432/bodp",
         description="Sync driver URL, used by Alembic and Celery workers.",
     )
-    DB_POOL_SIZE: int = 20
-    DB_MAX_OVERFLOW: int = 10
+    # Sized against Postgres's own max_connections (100 by default on
+    # this project's postgres:17-3.5 image — confirmed via `SHOW
+    # max_connections` during PLAN.md Phase 5's production-mode
+    # concurrency benchmark), NOT chosen independently per process. Six
+    # separate processes each hold their own pool against the same
+    # Postgres instance: 4 Gunicorn API workers (production Dockerfile,
+    # --workers 4) + celery-worker (concurrency=2, still one pool per
+    # process) + celery-worker-ingestion (concurrency=1). At the
+    # previous default (pool_size=20, max_overflow=10 = 30/process), 6
+    # processes could demand up to 180 connections against a 100-
+    # connection server — genuinely oversubscribed by design, which the
+    # benchmark surfaced as asyncpg.exceptions.TooManyConnectionsError
+    # ("sorry, too many clients already") under real concurrent load,
+    # not merely a slow-query symptom. 15/process x 6 processes = 90,
+    # leaving headroom under 100 for Postgres's own reserved/superuser
+    # connections and any ad-hoc psql/admin session.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 5
 
     # --- Redis / Celery ---
     REDIS_URL: RedisDsn = Field(default="redis://localhost:6379/0")
@@ -161,6 +177,57 @@ class Settings(BaseSettings):
     # station counts (~20-30), this keeps "low"/"medium" always sync and
     # only pushes "high" with many stations to a background job.
     VIZ_SPATIAL_SYNC_THRESHOLD_CELLS: int = 40_000
+
+    # --- PLAN.md Phase 5 concurrency limiter (per worker process) ---
+    # Caps how many DuckDB (Parquet)/xarray (Zarr) queries run
+    # concurrently INSIDE ONE Gunicorn worker process — every one of
+    # these runs via asyncio.to_thread and is genuinely CPU-bound (a
+    # real production-mode 4-worker benchmark measured backend container
+    # CPU hitting ~1100% of the host's 12 cores under 50-500 concurrent
+    # requests, with each DuckDB connection capped at 2 threads;
+    # unbounded concurrency meant far more simultaneous queries than the
+    # machine's real core count, which starved OTHER requests' Postgres
+    # connections — even ones with no DuckDB work at all — of CPU time
+    # to release them, exhausting the pool).
+    #
+    # Empirically tuned via direct A/B testing at concurrency=200 against
+    # this exact benchmark (200K-row Parquet dataset, real MinIO), not
+    # chosen a priori:
+    #   8/worker (32 system-wide): CPU still ~1100%, pool errors persist.
+    #   1/worker (4 system-wide):  MORE errors (73/600) — the semaphore
+    #                              wait itself becomes long enough that
+    #                              connections still time out waiting on
+    #                              the pool checkout (30s default).
+    #   2/worker (8 system-wide):  best measured tradeoff — 3/600 errors
+    #                              (down from 328/800 unbounded), though
+    #                              still real degradation at high
+    #                              concurrency (p50 ~23s at 200
+    #                              concurrent) — see PLAN.md Phase 5's
+    #                              concurrency benchmark section for the
+    #                              full sweep and the honest conclusion
+    #                              about what concurrency level this
+    #                              configuration actually sustains.
+    #
+    # This does not add a queue with unlimited depth — a request that
+    # can't acquire a slot waits on the semaphore itself (still holding
+    # its Postgres connection while it waits, which is the residual
+    # limitation — see DB_POOL_SIZE's docstring for the complementary
+    # fix), so total in-flight CPU-bound work is bounded by (workers x
+    # this value), not by whatever the OS scheduler happens to allow.
+    QUERY_CONCURRENCY_LIMIT_PER_WORKER: int = 2
+
+    # DuckDB's own SET threads=N per connection (tabular_query_service.py)
+    # — the direct lever on DuckDB's internal query-execution parallelism,
+    # separate from QUERY_CONCURRENCY_LIMIT_PER_WORKER above (which bounds
+    # how many DuckDB CALLS run concurrently, not how many threads each
+    # one uses). Re-benchmarked at 1 vs 2 against the real production-mode
+    # 4-worker setup: backend CPU stayed at ~1100% either way — DuckDB's
+    # httpfs/S3 extension appears to use additional OS threads for network
+    # I/O beyond what this compute-thread setting bounds, so lowering it
+    # further did not measurably change peak CPU in this benchmark. Left
+    # at 2 (not reduced to 1) since 1 showed no CPU benefit but should
+    # only ever slow down each individual query's own execution.
+    QUERY_DUCKDB_THREADS_PER_CONNECTION: int = 2
 
     # --- Email (SMTP-compatible transactional provider; swappable) ---
     SMTP_HOST: str = "localhost"

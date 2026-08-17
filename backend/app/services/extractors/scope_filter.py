@@ -16,16 +16,32 @@ def _find_column(columns, aliases: tuple[str, ...]) -> str | None:
     return None
 
 
+_EXACT_MATCH_SCOPE_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # (scope key, column-name aliases to look for) — same case-insensitive
+    # exact-match semantics as the existing "source" field below, extended
+    # to match catalog_service.RecordsFilter's full field set so a request
+    # snapshot's filters are honored identically at download time (not
+    # just the 4 fields this function originally supported).
+    ("source", ("source",)),
+    ("quality", ("quality_flag", "quality")),
+    ("platform", ("platform",)),
+    ("station", ("station",)),
+    ("format", ("format",)),
+    ("processing_level", ("processing_level",)),
+)
+
+
 def apply_scope_mask(df: pd.DataFrame, scope: dict) -> pd.DataFrame:
     """Filters a tidy/long-format DataFrame by a SearchCriteriaSchema-shaped
     scope dict — date range on the time column, bbox on lat/lon columns,
-    exact-match on the source column, membership-match on parameters
-    (checkbox multi-select — zero/empty means no parameter filtering)
-    wherever both the scope field and a matching column are present. Any
-    scope field with no matching column in this particular file is
-    silently skipped rather than erroring — not every dataset's file has
-    every column (e.g. a single-parameter dataset has no "parameter"
-    column to filter on)."""
+    depth range on the depth column, exact-match on source/quality/
+    platform/station/format/processing_level, membership-match on
+    parameters (checkbox multi-select — zero/empty means no parameter
+    filtering) wherever both the scope field and a matching column are
+    present. Any scope field with no matching column in this particular
+    file is silently skipped rather than erroring — not every dataset's
+    file has every column (e.g. a single-parameter dataset has no
+    "parameter" column to filter on)."""
     mask = pd.Series(True, index=df.index)
     columns = list(df.columns)
 
@@ -48,11 +64,23 @@ def apply_scope_mask(df: pd.DataFrame, scope: dict) -> pd.DataFrame:
             lons = pd.to_numeric(df[lon_col], errors="coerce")
             mask &= (lons >= bounds["lon_min"]) & (lons <= bounds["lon_max"])
 
-    source_value = scope.get("source")
-    if source_value:
-        col = _find_column(columns, ("source",))
-        if col is not None:
-            mask &= df[col].astype(str).str.lower() == str(source_value).lower()
+    depth_min = scope.get("depth_min")
+    depth_max = scope.get("depth_max")
+    if depth_min is not None or depth_max is not None:
+        depth_col = _find_column(columns, ("depth_m", "depth"))
+        if depth_col is not None:
+            depths = pd.to_numeric(df[depth_col], errors="coerce")
+            if depth_min is not None:
+                mask &= depths >= depth_min
+            if depth_max is not None:
+                mask &= depths <= depth_max
+
+    for scope_key, aliases in _EXACT_MATCH_SCOPE_FIELDS:
+        value = scope.get(scope_key)
+        if value:
+            col = _find_column(columns, aliases)
+            if col is not None:
+                mask &= df[col].astype(str).str.lower() == str(value).lower()
 
     parameters = scope.get("parameters")
     if parameters:

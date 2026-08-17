@@ -7,6 +7,7 @@ import scipy.io
 
 from app.core.config import settings
 from app.services.parsers.base import (
+    DataShape,
     FileParser,
     ParsedFileMetadata,
     ParserError,
@@ -15,7 +16,6 @@ from app.services.parsers.base import (
 from app.services.parsers.mat_gridded_struct import (
     GriddedStructField,
     TIME_CHUNK_SIZE,
-    ZARR_THRESHOLD_ELEMENTS,
     datenum_to_datetime,
     find_gridded_struct_field,
     is_plausible_datenum,
@@ -214,6 +214,7 @@ class MatParser(FileParser):
         }
 
         return ParsedFileMetadata(
+            shape=DataShape.GRIDDED,
             variables=[gridded.variable_name],
             dimensions=dimensions,
             spatial_lat_min=lat_min,
@@ -233,7 +234,7 @@ class MatParser(FileParser):
         variables = self._read_v73(path) if is_v73 else self._read_legacy(path)
         gridded = find_gridded_struct_field(variables)
         if gridded is not None:
-            return self._to_processed_gridded(gridded, output_path)
+            return self._gridded_to_zarr(gridded, output_dir)
 
         if is_v73:
             # Chunked path (Phase 2): reads each variable in row-slices via
@@ -272,100 +273,27 @@ class MatParser(FileParser):
             row_count=len(df),
         )
 
-    def _to_processed_gridded(self, gridded: GriddedStructField, output_path: Path) -> ProcessedArtifact:
-        """Flattens a detected gridded MATLAB struct into the same tidy
-        (time, lat, lon, <variable>) row shape netcdf_parser.py produces
-        from ds.to_dataframe() — chunked along the time axis using the
-        exact same chunk size/Zarr-switch threshold Phase 2 already
-        settled for NetCDF, not a reimplementation of that decision.
-
-        The whole struct is already fully loaded in memory by this point
-        (scipy.io.loadmat has no chunked-read API — same constraint
-        _read_legacy's LEGACY_MAT_MAX_SIZE_MB guard already exists for),
-        so "chunked" here bounds how much gets converted to Python-level
-        tidy rows / written to Parquet at once, not how much is held as
-        raw numpy arrays.
-        """
-        total_elements = int(gridded.val.size)
-        if total_elements > ZARR_THRESHOLD_ELEMENTS:
-            return self._gridded_to_zarr(gridded, output_path)
-        return self._gridded_to_parquet(gridded, output_path)
-
     def _gridded_source_crs_and_lonlat(self, gridded: GriddedStructField) -> tuple[np.ndarray, np.ndarray]:
         source_crs, _ = resolve_crs(gridded, embedded_crs=None)
         if source_crs is not None:
             return project_to_lonlat(gridded.x, gridded.y, source_crs)
         return gridded.x, gridded.y
 
-    def _gridded_to_parquet(self, gridded: GriddedStructField, output_path: Path) -> ProcessedArtifact:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        lon_grid, lat_grid = self._gridded_source_crs_and_lonlat(gridded)
-        ny, nx = gridded.x.shape
-        lat_flat = lat_grid.reshape(-1)
-        lon_flat = lon_grid.reshape(-1)
-
-        has_time = gridded.time_datenum is not None
-        writer: pq.ParquetWriter | None = None
-        row_count = 0
-
-        if has_time:
-            times = datenum_to_datetime(gridded.time_datenum)
-            time_len = gridded.time_datenum.size
-            for start in range(0, time_len, TIME_CHUNK_SIZE):
-                end = min(start + TIME_CHUNK_SIZE, time_len)
-                chunk_val = gridded.val[start:end].reshape(end - start, ny * nx)
-                chunk_times = np.repeat(times[start:end].values, ny * nx)
-                chunk_lat = np.tile(lat_flat, end - start)
-                chunk_lon = np.tile(lon_flat, end - start)
-                table = pa.table(
-                    {
-                        "time": chunk_times,
-                        "lat": chunk_lat,
-                        "lon": chunk_lon,
-                        gridded.variable_name: chunk_val.reshape(-1),
-                    }
-                )
-                if writer is None:
-                    writer = pq.ParquetWriter(output_path, table.schema)
-                writer.write_table(table)
-                row_count += table.num_rows
-        else:
-            table = pa.table(
-                {
-                    "lat": lat_flat,
-                    "lon": lon_flat,
-                    gridded.variable_name: gridded.val.reshape(-1),
-                }
-            )
-            writer = pq.ParquetWriter(output_path, table.schema)
-            writer.write_table(table)
-            row_count = table.num_rows
-
-        if writer is not None:
-            writer.close()
-
-        return ProcessedArtifact(
-            local_path=output_path,
-            content_type="application/vnd.apache.parquet",
-            file_extension="parquet",
-            row_count=row_count,
-        )
-
-    def _gridded_to_zarr(self, gridded: GriddedStructField, output_path: Path) -> ProcessedArtifact:
-        """Same Zarr-store-zipped-into-one-file approach netcdf_parser.py
-        uses for a large gridded NetCDF (see its _to_zarr docstring) —
-        built from an in-memory xr.Dataset here since a gridded .mat
-        struct has no native chunked-open API to stream from the way
-        xr.open_dataset(chunks=...) does for NetCDF."""
-        import shutil
-        import zipfile
-
+    def _gridded_to_zarr(self, gridded: GriddedStructField, output_dir: Path) -> ProcessedArtifact:
+        """Writes a detected gridded MATLAB struct as a real Zarr
+        directory store — the correct representation for GRIDDED data
+        regardless of size (PLAN.md Phase 5), mirroring
+        netcdf_parser.py's _to_zarr. Built from an in-memory xr.Dataset
+        since a gridded .mat struct has no native chunked-open API to
+        stream from the way xr.open_dataset(chunks=...) does for NetCDF
+        — the whole struct is already fully loaded in memory by this
+        point (scipy.io.loadmat has no chunked-read API; same constraint
+        _read_legacy's LEGACY_MAT_MAX_SIZE_MB guard exists for), so
+        "chunked" here governs the Zarr store's own on-disk chunk
+        layout, not how much is held as raw numpy arrays."""
         import xarray as xr
 
         lon_grid, lat_grid = self._gridded_source_crs_and_lonlat(gridded)
-        ny, nx = gridded.x.shape
 
         data_vars: dict[str, tuple]
         coords: dict[str, object] = {
@@ -383,21 +311,13 @@ class MatParser(FileParser):
         if gridded.units:
             ds[gridded.variable_name].attrs["units"] = gridded.units
 
-        zarr_dir = output_path.parent / "processed.zarr"
+        zarr_dir = output_dir / "processed.zarr"
         chunks = {"time": TIME_CHUNK_SIZE} if gridded.time_datenum is not None else "auto"
         ds.chunk(chunks).to_zarr(zarr_dir, mode="w")
 
-        zarr_zip_path = output_path.parent / "processed.zarr.zip"
-        with zipfile.ZipFile(zarr_zip_path, "w", zipfile.ZIP_STORED) as zf:
-            for file_path in zarr_dir.rglob("*"):
-                if file_path.is_file():
-                    zf.write(file_path, file_path.relative_to(zarr_dir))
-        shutil.rmtree(zarr_dir, ignore_errors=True)
-
         return ProcessedArtifact(
-            local_path=zarr_zip_path,
-            content_type="application/zip",
-            file_extension="zarr.zip",
+            local_dir=zarr_dir,
+            content_type="application/octet-stream",
             row_count=None,
             is_zarr=True,
         )

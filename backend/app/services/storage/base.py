@@ -66,6 +66,15 @@ class StorageService(ABC):
         (idempotent — safe to call from a cleanup/cascade path)."""
 
     @abstractmethod
+    def delete_prefix(self, bucket: str, prefix: str) -> None:
+        """Removes every object under `prefix` (PLAN.md Phase 5 — a Zarr
+        store is many small chunk/metadata objects under a shared prefix,
+        not one key, so cancellation/retry cleanup needs a prefix-scoped
+        delete rather than a single delete() call). Must not raise if no
+        objects exist under the prefix (idempotent, same contract as
+        delete())."""
+
+    @abstractmethod
     def exists(self, bucket: str, key: str) -> bool:
         ...
 

@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.core.database import AsyncSessionLocal
-from app.models.catalog import DatasetRecord
+from app.models.catalog import DatasetFile, DatasetRecord
 from app.scripts.backfill_dataset_records import backfill
 from tests.test_dataset_upload import _create_dataset, _make_csv_bytes
 
@@ -13,12 +13,18 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _upload_and_strip_records(client, admin_headers) -> tuple[str, str]:
-    """Uploads a real CSV through the full HTTP pipeline (so DatasetRecord
-    rows genuinely get written by the ingestion fix), then deletes those
-    rows directly — simulating the exact state every dataset uploaded
-    before this fix is actually in: a successfully-ingested DatasetFile
-    (file_metadata set, dataset.record_count correct) with zero
-    DatasetRecord rows."""
+    """Uploads a real CSV through the full HTTP pipeline, then deletes any
+    DatasetRecord rows and resets storage_kind to None — simulating the
+    exact state every dataset uploaded before both the original ingestion
+    fix AND PLAN.md Phase 5 is actually in: a successfully-ingested
+    DatasetFile (file_metadata set, dataset.record_count correct,
+    storage_kind unset — Phase 5 backfilled every pre-existing file to
+    'row_records', but this helper predates that backfill entirely) with
+    zero DatasetRecord rows. Phase 5 ingestion itself never writes
+    DatasetRecord rows anymore (by design, not a bug), so a live upload
+    alone can no longer construct this legacy scenario — storage_kind
+    must be reset explicitly to represent a true pre-Phase-5 file, which
+    is the only kind this repair script is meant to ever touch."""
     dataset_id = await _create_dataset(client, admin_headers)
     files = {"file": ("backfill_test.csv", _make_csv_bytes(), "text/csv")}
     r = await client.post(
@@ -29,6 +35,8 @@ async def _upload_and_strip_records(client, admin_headers) -> tuple[str, str]:
 
     async with AsyncSessionLocal() as db:
         await db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_id == uuid.UUID(dataset_id)))
+        dataset_file = await db.get(DatasetFile, uuid.UUID(dataset_file_id))
+        dataset_file.storage_kind = None
         await db.commit()
 
         result = await db.execute(

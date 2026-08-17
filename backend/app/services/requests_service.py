@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 
 from dateutil.relativedelta import relativedelta
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -34,7 +34,7 @@ def validate_scope_within_grant(requested: SearchCriteriaSchema, grant_scope: di
     if grant_scope is None:
         return
 
-    for field in ("category", "source"):
+    for field in ("category", "source", "quality", "platform", "station", "format", "processing_level"):
         grant_value = grant_scope.get(field)
         requested_value = getattr(requested, field)
         if grant_value and requested_value and requested_value != grant_value:
@@ -70,6 +70,19 @@ def validate_scope_within_grant(requested: SearchCriteriaSchema, grant_scope: di
         raise HTTPException(
             status_code=422,
             detail=f"Requested date_to {requested.date_to} is later than the grant's approved date_to {grant_date_to}.",
+        )
+
+    grant_depth_min = grant_scope.get("depth_min")
+    if grant_depth_min is not None and requested.depth_min is not None and requested.depth_min < grant_depth_min:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Requested depth_min {requested.depth_min} is shallower than the grant's approved depth_min {grant_depth_min}.",
+        )
+    grant_depth_max = grant_scope.get("depth_max")
+    if grant_depth_max is not None and requested.depth_max is not None and requested.depth_max > grant_depth_max:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Requested depth_max {requested.depth_max} is deeper than the grant's approved depth_max {grant_depth_max}.",
         )
 
     grant_bounds = grant_scope.get("bounds")
@@ -130,12 +143,29 @@ async def create_request(
     if dataset is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
+    # Coverage snapshot — computed ONCE, here, at request creation, and
+    # never again. This replaces the admin dashboard's previous behavior
+    # of recomputing the same numbers from scratch on every page load
+    # (profiled at ~96% of that endpoint's server time) — same
+    # RecordsFilter/catalog_service entry point get_request_coverage
+    # already used for a single-request lookup, just called once at
+    # creation instead of on every list view.
+    f = _records_filter_from_search_criteria(
+        search_criteria.model_dump(exclude_none=True) if search_criteria else None
+    )
+    matching, total = await catalog_service.get_matching_record_counts(db, dataset_id, f)
+    percent = round((matching / total) * 100, 1) if total > 0 else 0.0
+
     request = DatasetRequest(
         user_id=user.id,
         dataset_id=dataset_id,
         justification=justification,
         search_criteria=search_criteria.model_dump(exclude_none=True) if search_criteria else None,
         status=RequestStatus.PENDING.value,
+        matching_record_count=matching,
+        dataset_total_record_count=total,
+        matching_percent=percent,
+        dataset_version=dataset.version,
     )
     db.add(request)
     await db.flush()
@@ -184,21 +214,58 @@ def _records_filter_from_search_criteria(search_criteria: dict | None) -> Record
     raw_date_to = criteria.get("date_to")
     return RecordsFilter(
         parameters=criteria.get("parameters"),
+        quality=criteria.get("quality"),
         date_from=date.fromisoformat(raw_date_from) if raw_date_from else None,
         date_to=date.fromisoformat(raw_date_to) if raw_date_to else None,
         lat_min=bounds.get("lat_min") if bounds else None,
         lat_max=bounds.get("lat_max") if bounds else None,
         lon_min=bounds.get("lon_min") if bounds else None,
         lon_max=bounds.get("lon_max") if bounds else None,
+        depth_min=criteria.get("depth_min"),
+        depth_max=criteria.get("depth_max"),
         source=criteria.get("source"),
+        platform=criteria.get("platform"),
+        station=criteria.get("station"),
+        format_=criteria.get("format"),
+        processing_level=criteria.get("processing_level"),
     )
+
+
+def read_request_coverage_snapshot(request: DatasetRequest) -> dict:
+    """Reads the coverage snapshot already stored on this request (see
+    create_request) rather than recomputing it — the single-request
+    equivalent of list_requests_for_admin's per-row logic, used by the
+    reject endpoint's response (routers/admin_requests.py) so rejecting
+    a request doesn't pay a live query either. Requires request.dataset
+    to already be loaded (selectinload'd) — does not lazy-load."""
+    is_stale = (
+        request.dataset_version is not None
+        and request.dataset is not None
+        and request.dataset_version != request.dataset.version
+    )
+    return {
+        "matching_record_count": request.matching_record_count,
+        "dataset_total_record_count": request.dataset_total_record_count,
+        "matching_percent": request.matching_percent,
+        "is_stale": is_stale,
+    }
 
 
 async def get_request_coverage(db: AsyncSession, request: DatasetRequest) -> dict:
     """Computes matching_record_count/dataset_total_record_count/
     matching_percent for one request's own search_criteria, so the admin
     queue can show "how much of this dataset does the request cover"
-    without an extra round trip per row."""
+    without an extra round trip per row.
+
+    Disables Postgres JIT for this session only (SET LOCAL, scoped to the
+    current transaction — never a global/persistent setting change).
+    Measured via EXPLAIN ANALYZE against a real 723K-row dataset with a
+    spatial bbox filter: JIT compilation added ~425ms of pure overhead
+    (980ms -> 555ms with jit=off) to what's fundamentally a cheap
+    ad-hoc aggregate query, not the kind of hot/repeated query JIT is
+    meant to help — it was mis-triggering on query complexity (GiST
+    index + bitmap AND across 3 indexes), not actual cost."""
+    await db.execute(text("SET LOCAL jit = off"))
     f = _records_filter_from_search_criteria(request.search_criteria)
     matching, total = await catalog_service.get_matching_record_counts(db, request.dataset_id, f)
     percent = round((matching / total) * 100, 1) if total > 0 else 0.0
@@ -232,9 +299,31 @@ async def list_requests_for_admin(
     db: AsyncSession, *, status_filter: str | None = None
 ) -> list[tuple[DatasetRequest, dict]]:
     """Returns each request paired with its dataset-coverage figures
-    (matching_record_count/dataset_total_record_count/matching_percent),
-    computed from the request's own search_criteria — lets the admin
-    queue show "how much of the dataset" at a glance for every row."""
+    (matching_record_count/dataset_total_record_count/matching_percent,
+    is_stale) — lets the admin queue show "how much of the dataset" at a
+    glance for every row.
+
+    Reads the SNAPSHOT captured once at request-creation time (see
+    create_request) instead of recomputing it here. This used to
+    recompute from scratch, concurrently, for every request on every
+    page load — profiled at ~96% of this endpoint's server time (one
+    request referencing a 723K-row dataset with a spatial filter cost
+    ~1.6s alone under concurrent load; two referencing a 12M-element
+    Zarr-backed dataset cost ~3.2s each). None of that recomputation
+    happens here anymore.
+
+    is_stale is derived, not stored: True when the request's captured
+    dataset_version no longer matches the dataset's current version,
+    meaning ingestion has changed this dataset's contents since the
+    snapshot was taken — surfaced so an admin can tell "this number may
+    no longer be accurate" without the endpoint silently recomputing it
+    (which would reintroduce the exact cost this change removes).
+
+    A request created before this snapshot mechanism existed has
+    matching_record_count=None (nullable column, never backfilled — see
+    the migration's docstring) — returned as-is, not fabricated as 0 or
+    silently recomputed live; the router/frontend render this as "not
+    available" for those legacy rows specifically."""
     query = (
         select(DatasetRequest)
         .options(
@@ -247,7 +336,26 @@ async def list_requests_for_admin(
         query = query.where(DatasetRequest.status == status_filter)
     result = await db.execute(query)
     requests = list(result.scalars().all())
-    return [(r, await get_request_coverage(db, r)) for r in requests]
+
+    pairs = []
+    for r in requests:
+        is_stale = (
+            r.dataset_version is not None
+            and r.dataset is not None
+            and r.dataset_version != r.dataset.version
+        )
+        pairs.append(
+            (
+                r,
+                {
+                    "matching_record_count": r.matching_record_count,
+                    "dataset_total_record_count": r.dataset_total_record_count,
+                    "matching_percent": r.matching_percent,
+                    "is_stale": is_stale,
+                },
+            )
+        )
+    return pairs
 
 
 async def approve_request(

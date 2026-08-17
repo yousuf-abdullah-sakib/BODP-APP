@@ -6,18 +6,58 @@ import { useToast } from "@/context/ToastContext";
 import { submitRequest } from "@/lib/api/requests";
 import { ApiError } from "@/lib/api/client";
 import type { DatasetDetail } from "@/lib/types/catalog";
-import type { SpatialBounds } from "@/lib/geo/spatialAoi";
+import type { SearchCriteria } from "@/lib/types/requests";
+import type { DatasetDetailFilters } from "./useDatasetFilters";
 
 interface DatasetRequestModalProps {
   dataset: DatasetDetail;
-  criteria: {
-    parameters: string[];
-    dateFrom: string;
-    dateTo: string;
-    bounds: SpatialBounds | null;
-  };
+  // The full live filter panel state, not a narrowed subset — previously
+  // only parameters/dateFrom/dateTo/bounds were carried into the request
+  // (quality/depth/source/platform/station/format/processingLevel were
+  // silently dropped, confirmed via full-codebase trace), which meant a
+  // "snapshot" of the request's filters was never actually complete.
+  criteria: DatasetDetailFilters;
   onClose: () => void;
   onSubmitted: () => void;
+}
+
+function toSearchCriteria(criteria: DatasetDetailFilters): SearchCriteria | undefined {
+  const hasCriteria =
+    criteria.parameters.length > 0 ||
+    criteria.quality ||
+    criteria.dateFrom ||
+    criteria.dateTo ||
+    criteria.bounds ||
+    criteria.depthMin ||
+    criteria.depthMax ||
+    criteria.source ||
+    criteria.platform ||
+    criteria.station ||
+    criteria.format ||
+    criteria.processingLevel;
+  if (!hasCriteria) return undefined;
+
+  return {
+    parameters: criteria.parameters.length > 0 ? criteria.parameters : undefined,
+    quality: criteria.quality || undefined,
+    date_from: criteria.dateFrom || undefined,
+    date_to: criteria.dateTo || undefined,
+    depth_min: criteria.depthMin ? Number(criteria.depthMin) : undefined,
+    depth_max: criteria.depthMax ? Number(criteria.depthMax) : undefined,
+    source: criteria.source || undefined,
+    platform: criteria.platform || undefined,
+    station: criteria.station || undefined,
+    format: criteria.format || undefined,
+    processing_level: criteria.processingLevel || undefined,
+    bounds: criteria.bounds
+      ? {
+          lat_min: criteria.bounds.latMin,
+          lat_max: criteria.bounds.latMax,
+          lon_min: criteria.bounds.lonMin,
+          lon_max: criteria.bounds.lonMax,
+        }
+      : undefined,
+  };
 }
 
 export default function DatasetRequestModal({ dataset, criteria, onClose, onSubmitted }: DatasetRequestModalProps) {
@@ -27,7 +67,8 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
   const [file, setFile] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
-  const hasCriteria = criteria.parameters.length > 0 || criteria.dateFrom || criteria.dateTo || criteria.bounds;
+  const searchCriteria = toSearchCriteria(criteria);
+  const hasCriteria = searchCriteria !== undefined;
 
   async function submit() {
     if (!letter.trim() || letter.trim().length < 50) {
@@ -39,21 +80,7 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
       await submitRequest({
         datasetId: dataset.id,
         justification: letter.trim(),
-        searchCriteria: hasCriteria
-          ? {
-              parameters: criteria.parameters.length > 0 ? criteria.parameters : undefined,
-              date_from: criteria.dateFrom || undefined,
-              date_to: criteria.dateTo || undefined,
-              bounds: criteria.bounds
-                ? {
-                    lat_min: criteria.bounds.latMin,
-                    lat_max: criteria.bounds.latMax,
-                    lon_min: criteria.bounds.lonMin,
-                    lon_max: criteria.bounds.lonMax,
-                  }
-                : undefined,
-            }
-          : undefined,
+        searchCriteria,
         file,
       });
       onSubmitted();
@@ -96,11 +123,22 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
           <h4>Your Search Criteria</h4>
           <div className="req-letter-box" style={{ fontSize: "0.8rem" }}>
             {criteria.parameters.length > 0 && <div>Parameters: {criteria.parameters.join(", ")}</div>}
+            {criteria.quality && <div>Quality: {criteria.quality}</div>}
             {(criteria.dateFrom || criteria.dateTo) && (
               <div>
                 Date Range: {criteria.dateFrom || "—"} to {criteria.dateTo || "—"}
               </div>
             )}
+            {(criteria.depthMin || criteria.depthMax) && (
+              <div>
+                Depth: {criteria.depthMin || "—"}m to {criteria.depthMax || "—"}m
+              </div>
+            )}
+            {criteria.source && <div>Source: {criteria.source}</div>}
+            {criteria.platform && <div>Platform: {criteria.platform}</div>}
+            {criteria.station && <div>Station: {criteria.station}</div>}
+            {criteria.format && <div>Format: {criteria.format}</div>}
+            {criteria.processingLevel && <div>Processing Level: {criteria.processingLevel}</div>}
             {criteria.bounds && (
               <div>
                 Spatial Bounds: Lat {criteria.bounds.latMin.toFixed(2)}°–{criteria.bounds.latMax.toFixed(2)}°, Lon{" "}

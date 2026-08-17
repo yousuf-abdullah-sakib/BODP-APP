@@ -1,10 +1,10 @@
 import math
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.catalog import Dataset, DatasetFile, StorageBackend
+from app.models.catalog import Dataset, DatasetFile, DatasetRecord, StorageBackend
 from app.models.uploads import Upload, UploadStatus
 from app.services.ingestion_service import UploadValidationError, validate_extension, validate_size
 from app.services.storage import raw_key
@@ -248,6 +248,15 @@ async def cancel_upload(
             dataset_file = await db.get(DatasetFile, upload.dataset_file_id)
             if dataset_file is not None:
                 storage.delete(dataset_file.storage_bucket, dataset_file.storage_key)
+                # DatasetRecord.dataset_file_id has no ON DELETE CASCADE
+                # (deliberately — see its model docstring), so any rows
+                # must be deleted explicitly before the DatasetFile row
+                # itself, or this delete would raise IntegrityError. A
+                # no-op today (QUEUED means ingestion, which is the only
+                # thing that writes DatasetRecords, never started) — kept
+                # explicit rather than assumed, matching every other
+                # DatasetFile-deletion site in the codebase.
+                await db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_file_id == dataset_file.id))
                 await db.delete(dataset_file)
         elif upload.storage_bucket and upload.storage_key:
             storage.delete(upload.storage_bucket, upload.storage_key)

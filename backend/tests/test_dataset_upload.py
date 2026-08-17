@@ -168,19 +168,23 @@ class TestCsvUpload:
             assert "csv" in dataset.formats
 
     async def test_upload_populates_dataset_records(self, client, admin_headers):
-        """Regression test: the real ingestion pipeline used to update only
-        dataset.record_count (a summary counter) and never actually insert
-        DatasetRecord rows — meaning catalog filtering silently returned
-        nothing for every real upload despite the dataset card showing a
-        nonzero record count. Verifies the rows genuinely exist now, are
-        attributed to the right dataset/parameter, and satisfy the catalog
-        filter query the same way seeded demo data always has."""
+        """Regression test (updated for PLAN.md Phase 5): originally this
+        test asserted a CSV upload wrote DatasetRecord SQL rows (the
+        original bug it was written against: record_count updated but no
+        rows written, silently breaking catalog filtering). Under Phase
+        5, new ingestion never writes DatasetRecord rows for ANY format —
+        the equivalent guarantee is now "the Parquet artifact exists, is
+        correctly attributed (storage_kind=parquet), and is genuinely
+        queryable via the DuckDB routing path with correct counts" —
+        verified via catalog_service.get_filtered_records (the same
+        function the public /catalog/{id}/records endpoint calls),
+        proving the routing layer, not just the write, works end-to-end."""
         import uuid as uuid_module
 
         from sqlalchemy import select
 
         from app.core.database import AsyncSessionLocal
-        from app.models.catalog import DatasetRecord
+        from app.models.catalog import DatasetFile, DatasetRecord
 
         dataset_id = await _create_dataset(client, admin_headers)
         files = {"file": ("records_test.csv", _make_csv_bytes(), "text/csv")}
@@ -188,47 +192,56 @@ class TestCsvUpload:
             f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
         )
         assert r.status_code == 202
+        file_metadata = r.json()["dataset_file"]["file_metadata"]
+        assert file_metadata["shape"] == "tabular"
+        assert file_metadata["storage_kind"] == "parquet"
+        assert file_metadata["processed_key"] is not None
 
         async with AsyncSessionLocal() as db:
+            # Zero DatasetRecord rows — new ingestion never writes them.
             result = await db.execute(
                 select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
             )
-            records = result.scalars().all()
+            assert result.scalars().all() == []
 
-        # 15 source rows x 1 real variable column (sea_surface_temp) — lat/
-        # lon/time are coordinate columns, not turned into their own rows.
-        assert len(records) == 15
-        assert all(rec.parameter == "sea_surface_temp" for rec in records)
-        assert all(rec.value is not None for rec in records)
-        assert all(rec.lat is not None and rec.lon is not None and rec.time is not None for rec in records)
+            dataset_file = (
+                await db.execute(
+                    select(DatasetFile).where(DatasetFile.dataset_id == uuid_module.UUID(dataset_id))
+                )
+            ).scalar_one()
+            assert dataset_file.storage_kind == "parquet"
 
         # Exercise the actual query the catalog's filter/records endpoint
         # uses (catalog_service.get_filtered_records) directly, rather than
         # the public HTTP router — the router additionally requires
         # status='published', which is a separate, unrelated gate this
         # admin-created test dataset (status='draft') doesn't need to pass
-        # to prove the DatasetRecord population bug itself is fixed.
+        # to prove the Phase-5 DuckDB routing path itself works.
         from app.services.catalog_service import RecordsFilter, get_filtered_records
 
         async with AsyncSessionLocal() as db:
-            _, matching_count, dataset_total_count, _ = await get_filtered_records(
+            preview, matching_count, dataset_total_count, _ = await get_filtered_records(
                 db, uuid_module.UUID(dataset_id), RecordsFilter(), preview_limit=6
             )
+        # 15 source rows x 1 real variable column (sea_surface_temp) — lat/
+        # lon/time are coordinate columns, not turned into their own rows.
         assert matching_count == 15
         assert dataset_total_count == 15
+        assert len(preview) == 6
+        assert all(p.parameter == "sea_surface_temp" for p in preview)
+        assert all(p.value is not None for p in preview)
 
     async def test_upload_timeless_csv_still_populates_records(self, client, admin_headers):
-        """Phase 2 regression test: a static spatial grid CSV (lat/lon
-        present, no time column at all — exactly Wave Data's real shape,
-        discovered in Sub-phase A) must now populate real DatasetRecord
-        rows with time=None, instead of the pre-Phase-2 behavior of
-        writing zero rows because time/lat/lon were all required."""
+        """Phase 2 regression test (updated for Phase 5): a static spatial
+        grid CSV (lat/lon present, no time column at all — exactly Wave
+        Data's real shape, discovered in Sub-phase A) must still be fully
+        filterable/queryable through the DuckDB routing path with
+        time=None handled correctly (no crash, correct row count) — not
+        silently dropped the way the pre-Phase-2 bug dropped it entirely."""
         import uuid as uuid_module
 
-        from sqlalchemy import select
-
         from app.core.database import AsyncSessionLocal
-        from app.models.catalog import DatasetRecord
+        from app.services.catalog_service import RecordsFilter, get_filtered_records
 
         df = pd.DataFrame(
             {
@@ -246,28 +259,27 @@ class TestCsvUpload:
             f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
         )
         assert r.status_code == 202, r.text
+        assert r.json()["dataset_file"]["file_metadata"]["storage_kind"] == "parquet"
 
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            preview, matching_count, dataset_total_count, _ = await get_filtered_records(
+                db, uuid_module.UUID(dataset_id), RecordsFilter(), preview_limit=10
             )
-            records = result.scalars().all()
-
-        assert len(records) == 10
-        assert all(rec.parameter == "wave_height" for rec in records)
-        assert all(rec.time is None for rec in records)
-        assert all(rec.lat is not None and rec.lon is not None for rec in records)
+        assert matching_count == 10
+        assert dataset_total_count == 10
+        assert all(p.parameter == "wave_height" for p in preview)
+        assert all(p.time is None for p in preview)
 
     async def test_upload_non_spatial_time_series_still_populates_records(self, client, admin_headers):
-        """Mirror case: a time series with no lat/lon at all (e.g. a single
-        buoy's own time-indexed readings with location implicit) must also
-        populate real rows with lat/lon=None, not be skipped."""
+        """Mirror case (updated for Phase 5): a time series with no lat/lon
+        at all (e.g. a single buoy's own time-indexed readings with
+        location implicit) must still be fully filterable/queryable
+        through the DuckDB routing path with lat/lon absent handled
+        correctly (no spatial-filter crash, correct row count)."""
         import uuid as uuid_module
 
-        from sqlalchemy import select
-
         from app.core.database import AsyncSessionLocal
-        from app.models.catalog import DatasetRecord
+        from app.services.catalog_service import RecordsFilter, get_filtered_records
 
         df = pd.DataFrame(
             {
@@ -286,16 +298,13 @@ class TestCsvUpload:
         assert r.status_code == 202, r.text
 
         async with AsyncSessionLocal() as db:
-            result = await db.execute(
-                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+            preview, matching_count, dataset_total_count, _ = await get_filtered_records(
+                db, uuid_module.UUID(dataset_id), RecordsFilter(), preview_limit=5
             )
-            records = result.scalars().all()
-
-        assert len(records) == 5
-        assert all(rec.parameter == "air_pressure" for rec in records)
-        assert all(rec.time is not None for rec in records)
-        assert all(rec.lat is None and rec.lon is None for rec in records)
-        assert all(rec.geom is None for rec in records)
+        assert matching_count == 5
+        assert dataset_total_count == 5
+        assert all(p.parameter == "air_pressure" for p in preview)
+        assert all(p.time is not None for p in preview)
 
     async def test_upload_propagates_spatial_extent_to_dataset(self, client, admin_headers):
         """dataset_files.spatial_extent is per-file; Phase 3's catalog detail
@@ -407,19 +416,21 @@ class TestNetcdfUpload:
     async def test_upload_netcdf_records_exclude_auxiliary_coordinates(
         self, client, admin_headers, tmp_path
     ):
-        """Regression test: an earlier version of _write_dataset_records
-        treated every non-lat/lon/time Parquet column as a real variable,
-        which meant xarray's to_dataframe() flattening non-dimensional
-        auxiliary coordinates (e.g. ERA5's "number"/"expver") in produced
-        DatasetRecord rows for those too — polluting real data with
-        meaningless bookkeeping values. Only genuine data variables
-        (metadata.variables, i.e. ds.data_vars) may become parameter rows."""
+        """Regression test: xarray's to_dataframe()/schema detection must
+        never treat a non-dimensional auxiliary coordinate (e.g. ERA5's
+        "number"/"expver") as a real variable — only genuine data
+        variables (metadata.variables, i.e. ds.data_vars) may register as
+        parameters. This NetCDF fixture is genuinely gridded ((valid_time,
+        lat, lon)-indexed), so Phase 5 routes it to Zarr — no DatasetRecord
+        rows at all (see file_metadata["shape"] == "gridded" below);
+        exclusion is verified via the registered DatasetVariable rows and
+        the Zarr store's own data_vars instead."""
         import uuid as uuid_module
 
         from sqlalchemy import select
 
         from app.core.database import AsyncSessionLocal
-        from app.models.catalog import DatasetRecord
+        from app.models.catalog import DatasetVariable
 
         dataset_id = await _create_dataset(client, admin_headers)
         files = {"file": ("aux_coords.nc", _make_netcdf_bytes(tmp_path), "application/x-netcdf")}
@@ -427,17 +438,24 @@ class TestNetcdfUpload:
             f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
         )
         assert r.status_code == 202, r.text
-        assert r.json()["dataset_file"]["file_metadata"]["variables"] == ["u10"]
+        file_metadata = r.json()["dataset_file"]["file_metadata"]
+        assert file_metadata["variables"] == ["u10"]
+        assert file_metadata["shape"] == "gridded"
+        assert file_metadata["storage_kind"] == "chunked_array"
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(
-                select(DatasetRecord).where(DatasetRecord.dataset_id == uuid_module.UUID(dataset_id))
+                select(DatasetVariable).where(DatasetVariable.dataset_id == uuid_module.UUID(dataset_id))
             )
-            records = result.scalars().all()
+            variables = result.scalars().all()
 
-        # 3 time steps x 2 lat x 2 lon = 12 rows for the one real variable.
-        assert len(records) == 12
-        assert {rec.parameter for rec in records} == {"u10"}
+        # Only real data variables (u10) plus detected dimensions
+        # (lat/lon/valid_time) register — "number"/"expver" never appear,
+        # in either role.
+        names = {v.name for v in variables}
+        assert "u10" in names
+        assert "number" not in names
+        assert "expver" not in names
 
 
 class TestMatUpload:

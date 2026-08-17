@@ -142,13 +142,14 @@ class TestDatasetVariableRegistryNetcdf:
         assert "expver" not in names
 
     async def test_zarr_backed_upload_registers_variables_without_dataset_records(
-        self, client, admin_headers, tmp_path, monkeypatch
+        self, client, admin_headers, tmp_path
     ):
-        """End-to-end: a NetCDF file large enough to trigger the Zarr
-        output path must still register its variables in the schema
-        registry, but must NOT produce any DatasetRecord rows (a Zarr
-        store has no tidy-table row concept — _write_dataset_records
-        reads a Parquet file, which doesn't exist for this artifact)."""
+        """End-to-end: a genuinely gridded NetCDF file (>=2 non-time
+        dimensions on a data variable — PLAN.md Phase 5's shape-based
+        routing, not a size threshold) must still register its variables
+        in the schema registry, but must NOT produce any DatasetRecord
+        rows (a Zarr store has no tidy-table row concept —
+        _write_dataset_records is never called for gridded data)."""
         import uuid as uuid_module
 
         import numpy as np
@@ -158,11 +159,8 @@ class TestDatasetVariableRegistryNetcdf:
 
         from app.core.database import AsyncSessionLocal
         from app.models.catalog import DatasetRecord
-        import app.services.parsers.netcdf_parser as netcdf_module
 
-        monkeypatch.setattr(netcdf_module, "_ZARR_THRESHOLD_ELEMENTS", 10)
-
-        n_time = 15
+        n_time = 5
         times = pd.date_range("2024-01-01", periods=n_time, freq="D")
         lats = np.linspace(20.0, 21.0, 3)
         lons = np.linspace(90.0, 91.0, 3)
@@ -181,7 +179,11 @@ class TestDatasetVariableRegistryNetcdf:
             f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
         )
         assert r.status_code == 202, r.text
-        assert r.json()["dataset_file"]["file_metadata"]["processed_key"].endswith(".zarr.zip")
+        file_metadata = r.json()["dataset_file"]["file_metadata"]
+        assert file_metadata["shape"] == "gridded"
+        assert file_metadata["storage_kind"] == "chunked_array"
+        assert file_metadata["processed_key"] is None
+        assert file_metadata["processed_prefix"] is not None
 
         variables = await _variables_for(dataset_id)
         names = {v.name for v in variables}

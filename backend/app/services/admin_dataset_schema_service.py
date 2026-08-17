@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditActionType
-from app.models.catalog import Dataset, DatasetVariable
+from app.models.catalog import Dataset, DatasetFile, DatasetVariable
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -74,6 +74,11 @@ async def get_dataset_schema(db: AsyncSession, dataset_id: uuid.UUID) -> dict:
         reviewer = await db.get(User, dataset.schema_reviewed_by)
         reviewer_name = reviewer.full_name if reviewer else None
 
+    files_result = await db.execute(
+        select(DatasetFile).where(DatasetFile.dataset_id == dataset_id).order_by(DatasetFile.uploaded_at)
+    )
+    files = list(files_result.scalars().all())
+
     return {
         "dataset_id": dataset.id,
         "dataset_code": dataset.code,
@@ -81,6 +86,7 @@ async def get_dataset_schema(db: AsyncSession, dataset_id: uuid.UUID) -> dict:
         "schema_reviewed_at": dataset.schema_reviewed_at,
         "schema_reviewed_by_name": reviewer_name,
         "variables": variables,
+        "files": files,
     }
 
 

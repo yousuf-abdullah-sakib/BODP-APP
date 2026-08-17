@@ -5,8 +5,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from sqlalchemy import delete
+
 from app.models.audit import AuditActionType
-from app.models.catalog import Dataset, DatasetStatus
+from app.models.catalog import Dataset, DatasetRecord, DatasetStatus
 from app.models.requests import AccessGrant, GrantStatus
 from app.models.user import User
 from app.schemas.admin_datasets import DatasetCreate, DatasetUpdate
@@ -225,8 +227,28 @@ async def permanently_delete_dataset(
         meta = file.file_metadata or {}
         processed_key = meta.get("processed_key")
         processed_bucket = meta.get("processed_bucket")
+        processed_prefix = meta.get("processed_prefix")
         if processed_key and processed_bucket:
             storage.delete(processed_bucket, processed_key)
+        elif processed_prefix and processed_bucket:
+            # PLAN.md Phase 5: a CHUNKED_ARRAY (Zarr) file has no single
+            # processed_key object — its processed artifact is a
+            # multi-object prefix, deleted the same way ingestion.py's
+            # own cleanup path already does for a cancelled Zarr upload.
+            storage.delete_prefix(processed_bucket, processed_prefix)
+
+    # DatasetRecord.dataset_file_id deliberately has no ON DELETE cascade
+    # (see the column's own docstring in models/catalog.py) specifically
+    # so a DatasetFile can never be silently deleted while DatasetRecord
+    # rows still reference it — every other DatasetFile-deleting code
+    # path (ingestion.py's _cleanup_cancelled_ingestion, multipart
+    # upload/orphan cleanup) already deletes by dataset_file_id first.
+    # This path was the one gap: deleting the whole Dataset cascades to
+    # DatasetFile at the ORM level, which then hit a real FK violation
+    # from any legacy (pre-Phase-5) DatasetRecord rows still pointing at
+    # it. Deleting by dataset_id (not per-file) covers both provenance-
+    # tagged and untagged (NULL dataset_file_id, pre-provenance) rows.
+    await db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_id == dataset.id))
 
     await write_audit_log(
         db,
@@ -236,7 +258,8 @@ async def permanently_delete_dataset(
         target=f"{dataset.title} ({dataset.code})",
         ip_address=ip_address,
     )
-    # Cascades DatasetFile/DatasetRecord at both ORM (cascade="all,
-    # delete-orphan") and DB (ondelete="CASCADE") level.
+    # Cascades DatasetFile at both ORM (cascade="all, delete-orphan") and
+    # DB (ondelete="CASCADE") level — DatasetRecord rows are already gone
+    # (deleted explicitly above, per this column's no-cascade-by-design).
     await db.delete(dataset)
     await db.commit()

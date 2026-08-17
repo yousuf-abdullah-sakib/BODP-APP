@@ -63,6 +63,24 @@ class DatasetRequest(UUIDPKMixin, Base):
     supporting_document_file_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("dataset_files.id", ondelete="SET NULL")
     )
+    # Coverage snapshot — computed ONCE via catalog_service.
+    # get_matching_record_counts at request-creation time (requests_
+    # service.create_request) and never recomputed afterward. Previously
+    # the admin dashboard recomputed this live, from scratch, for every
+    # request on every page load (confirmed via profiling: ~96% of that
+    # endpoint's server time). Nullable because a request created before
+    # this column existed has no snapshot to backfill from — shown as
+    # "not available" rather than fabricated as 0.
+    matching_record_count: Mapped[int | None] = mapped_column()
+    dataset_total_record_count: Mapped[int | None] = mapped_column()
+    matching_percent: Mapped[float | None] = mapped_column()
+    # Dataset.version at the moment this snapshot was computed — lets the
+    # admin dashboard detect staleness (dataset.version has since moved
+    # on, meaning matching_record_count/dataset_total_record_count above
+    # may no longer reflect the dataset's actual current contents)
+    # without needing to recompute anything. Nullable for the same
+    # pre-existing-row reason as the snapshot counts above.
+    dataset_version: Mapped[int | None] = mapped_column()
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default=RequestStatus.PENDING.value, index=True
     )

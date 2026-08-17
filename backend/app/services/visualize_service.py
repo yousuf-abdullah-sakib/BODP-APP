@@ -15,7 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.cache import cache_get_json, cache_set_json
 from app.core.config import settings
 from app.models.admin import SiteSettings
-from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, DatasetVariable, Station
+from app.models.catalog import (
+    Dataset,
+    DatasetCategory,
+    DatasetFile,
+    DatasetRecord,
+    DatasetVariable,
+    Station,
+    StorageKind,
+)
 from app.models.visualize import VisualizationJob, VizJobStatus
 from app.schemas.visualize import (
     AnnualAnomaly,
@@ -45,6 +53,7 @@ from app.schemas.visualize import (
     VizFilterParams,
 )
 from app.services import settings_service
+from app.services.query_concurrency import bounded_to_thread
 
 _CACHE_TTL_SECONDS = 300
 
@@ -96,6 +105,97 @@ def _apply_viz_filters(query, f: VizFilterParams):
         envelope = func.ST_MakeEnvelope(f.lon_min, f.lat_min, f.lon_max, f.lat_max, 4326)
         query = query.where(func.ST_Intersects(DatasetRecord.geom, envelope))
     return query
+
+
+# --- Storage routing (PLAN.md Phase 5) ---
+#
+# Mirrors catalog_service._non_legacy_dataset_files/get_filtered_records'
+# additive routing pattern exactly: the legacy DatasetRecord SQL query
+# always runs (untouched, below), and PARQUET/CHUNKED_ARRAY-backed files
+# belonging to the SAME dataset_id are queried via tabular_query_service/
+# gridded_query_service and merged in on top. Only reachable when a
+# caller actually supplied dataset_id — Visualize's pre-Phase-4 global
+# cross-dataset queries have no single dataset to route by file, so they
+# keep querying DatasetRecord exclusively, exactly as before.
+
+
+async def _non_legacy_dataset_files(db: AsyncSession, dataset_id: uuid.UUID) -> dict[str, list[DatasetFile]]:
+    result = await db.execute(
+        select(DatasetFile).where(
+            DatasetFile.dataset_id == dataset_id,
+            DatasetFile.storage_kind.in_([StorageKind.PARQUET.value, StorageKind.CHUNKED_ARRAY.value]),
+        )
+    )
+    files = list(result.scalars().all())
+    grouped: dict[str, list[DatasetFile]] = {}
+    for file in files:
+        grouped.setdefault(file.storage_kind, []).append(file)
+    return grouped
+
+
+def _viz_filter_to_records_filter(f: VizFilterParams):
+    from app.services.catalog_service import RecordsFilter
+
+    return RecordsFilter(
+        date_from=f.date_from,
+        date_to=f.date_to,
+        lat_min=f.lat_min,
+        lat_max=f.lat_max,
+        lon_min=f.lon_min,
+        lon_max=f.lon_max,
+        depth_min=f.depth_min,
+        depth_max=f.depth_max,
+        station=f.station,
+    )
+
+
+async def _merged_timeseries(
+    db: AsyncSession, dataset_id: uuid.UUID, parameter: str, f: VizFilterParams, *, resolution: str
+) -> list[tuple[date, float, int]]:
+    """Combines every PARQUET/CHUNKED_ARRAY file's per-bucket (avg, count)
+    contributions into one correctly-weighted series — a plain mean of
+    per-file bucket averages would be wrong once more than one file
+    covers the same bucket, so buckets are recombined as a weighted mean
+    (sum(avg*count)/sum(count)) exactly like combining two SQL AVG()
+    results would require. Returns (bucket, avg, n) — n is the TOTAL
+    weight backing that bucket's avg (not necessarily a real row count
+    for gridded data, see below), so callers can correctly fold this
+    into a further weighted merge (e.g. with the legacy SQL path's own
+    per-bucket counts) instead of treating an already-averaged bucket as
+    a single unweighted observation."""
+    from app.services import gridded_query_service, tabular_query_service
+
+    record_filter = _viz_filter_to_records_filter(f)
+    grouped = await _non_legacy_dataset_files(db, dataset_id)
+
+    weighted: dict[date, list[float]] = defaultdict(lambda: [0.0, 0.0])  # bucket -> [sum(avg*n), sum(n)]
+    for file in grouped.get(StorageKind.PARQUET.value, []):
+        rows, _cols = await bounded_to_thread(
+            tabular_query_service.get_timeseries_with_counts, file, parameter, record_filter, resolution=resolution
+        )
+        for bucket, avg, n in rows:
+            weighted[bucket][0] += avg * n
+            weighted[bucket][1] += n
+
+    for file in grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+        rows = await bounded_to_thread(
+            gridded_query_service.get_timeseries_aggregate,
+            file,
+            parameter=parameter,
+            resolution=resolution,
+            f=record_filter,
+        )
+        for bucket, avg in rows:
+            # Gridded aggregate has no per-bucket row count to weight by —
+            # treated as a single observation, same convention
+            # get_timeseries_with_counts falls back to when a bucket has
+            # exactly one contributing row.
+            weighted[bucket][0] += avg
+            weighted[bucket][1] += 1
+
+    return sorted(
+        (bucket, total / n, int(n)) for bucket, (total, n) in weighted.items() if n > 0
+    )
 
 
 # --- Dataset scoping (PLAN.md Phase 4) ---
@@ -288,7 +388,7 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
     trunc_unit = _resolution_trunc(params.resolution)
     bucket = func.date_trunc(trunc_unit, DatasetRecord.time).label("bucket")
     query = (
-        select(bucket, func.avg(DatasetRecord.value).label("avg_value"))
+        select(bucket, func.avg(DatasetRecord.value).label("avg_value"), func.count().label("n"))
         .where(DatasetRecord.parameter == params.parameter)
         .group_by(bucket)
         .order_by(bucket)
@@ -298,7 +398,37 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
     result = await db.execute(query)
     rows = result.all()
 
-    series = [SeriesPointSchema(date=row.bucket.date(), value=float(row.avg_value)) for row in rows]
+    # PLAN.md Phase 5: sql_weighted starts from the legacy SQL buckets
+    # (always queried, exactly as before), then PARQUET/CHUNKED_ARRAY
+    # files belonging to the SAME dataset_id are merged in additively —
+    # see _merged_timeseries' docstring for why this is a weighted mean,
+    # not a plain concatenation.
+    weighted: dict[date, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for row in rows:
+        bucket_date = row.bucket.date()
+        weighted[bucket_date][0] += float(row.avg_value) * row.n
+        weighted[bucket_date][1] += row.n
+
+    if params.dataset_id:
+        non_legacy_rows = await _merged_timeseries(
+            db, params.dataset_id, params.parameter, params, resolution=params.resolution
+        )
+        # _merged_timeseries returns (bucket, avg, n) — n is the real
+        # weight backing that average, so it must be folded into the SQL
+        # path's own weighted totals the same way (sum(avg*n), sum(n)),
+        # not added as a single unweighted point, or a bucket spanning
+        # both a legacy row_records row and many Parquet rows would be
+        # incorrectly skewed toward whichever source happened to average
+        # fewer contributing rows.
+        for bucket_date, avg, n in non_legacy_rows:
+            weighted[bucket_date][0] += avg * n
+            weighted[bucket_date][1] += n
+
+    series = [
+        SeriesPointSchema(date=bucket_date, value=total / n)
+        for bucket_date, (total, n) in sorted(weighted.items())
+        if n > 0
+    ]
     values = [p.value for p in series]
 
     slope, intercept = _linreg(values)
@@ -383,10 +513,32 @@ async def get_spatial_points(db: AsyncSession, params: SpatialRequest) -> list[S
     )
     result = await db.execute(query)
     rows = result.all()
-    return [
+    points = [
         SpatialPointSchema(station=row.name, lat=float(row.lat), lon=float(row.lon), value=float(row.value))
         for row in rows
     ]
+
+    if params.dataset_id:
+        from app.services import gridded_query_service, tabular_query_service
+
+        record_filter = _viz_filter_to_records_filter(params)
+        grouped = await _non_legacy_dataset_files(db, params.dataset_id)
+        for file in grouped.get(StorageKind.PARQUET.value, []):
+            file_points = await bounded_to_thread(
+                tabular_query_service.get_spatial_points, file, params.parameter, record_filter
+            )
+            points.extend(
+                SpatialPointSchema(station=p.station, lat=p.lat, lon=p.lon, value=p.value) for p in file_points
+            )
+        for file in grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+            file_points = await bounded_to_thread(
+                gridded_query_service.get_spatial_points, file, params.parameter, record_filter
+            )
+            points.extend(
+                SpatialPointSchema(station=p.station, lat=p.lat, lon=p.lon, value=p.value) for p in file_points
+            )
+
+    return points
 
 
 def _idw(points: list[SpatialPointSchema], lats: np.ndarray, lons: np.ndarray, power: int = 2) -> np.ndarray:
@@ -500,6 +652,11 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
     if cached is not None:
         return ComparisonResponse.model_validate(cached)
 
+    non_legacy_grouped = (
+        await _non_legacy_dataset_files(db, params.dataset_id) if params.dataset_id else {}
+    )
+    record_filter = _viz_filter_to_records_filter(params) if params.dataset_id else None
+
     series_by_parameter: dict[str, list[SeriesPointSchema]] = {}
     for parameter in params.parameters:
         query = (
@@ -510,8 +667,31 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
         )
         query = _apply_viz_filters(query, params)
         result = await db.execute(query)
+
+        by_date: dict[date, list[float]] = defaultdict(list)
+        for row in result.all():
+            by_date[row.time].append(float(row.avg_value))
+
+        if non_legacy_grouped:
+            from app.services import gridded_query_service, tabular_query_service
+
+            for file in non_legacy_grouped.get(StorageKind.PARQUET.value, []):
+                raw = await bounded_to_thread(
+                    tabular_query_service.get_raw_values, file, parameter, record_filter
+                )
+                for _station, t, value in raw:
+                    if t is not None:
+                        by_date[t].append(value)
+            for file in non_legacy_grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+                raw = await bounded_to_thread(
+                    gridded_query_service.get_raw_values, file, parameter, record_filter
+                )
+                for _station, t, value in raw:
+                    if t is not None:
+                        by_date[t].append(value)
+
         series_by_parameter[parameter] = [
-            SeriesPointSchema(date=row.time, value=float(row.avg_value)) for row in result.all()
+            SeriesPointSchema(date=d, value=_mean(vals)) for d, vals in sorted(by_date.items())
         ]
 
     x_param, y_param = params.parameters[0], params.parameters[1]
@@ -587,6 +767,11 @@ async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> Statist
     if cached is not None:
         return StatisticsResponse.model_validate(cached)
 
+    non_legacy_grouped = (
+        await _non_legacy_dataset_files(db, params.dataset_id) if params.dataset_id else {}
+    )
+    record_filter = _viz_filter_to_records_filter(params) if params.dataset_id else None
+
     box_query = (
         select(Station.name, DatasetRecord.value)
         .join(Station, Station.id == DatasetRecord.station_id)
@@ -598,6 +783,28 @@ async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> Statist
     by_station: dict[str, list[float]] = defaultdict(list)
     for row in box_result.all():
         by_station[row.name].append(float(row.value))
+
+    raw_by_date: dict[date, list[float]] = defaultdict(list)
+    if non_legacy_grouped:
+        from app.services import gridded_query_service, tabular_query_service
+
+        for file in non_legacy_grouped.get(StorageKind.PARQUET.value, []):
+            raw = await bounded_to_thread(
+                tabular_query_service.get_raw_values, file, params.parameter, record_filter
+            )
+            for station, t, value in raw:
+                by_station[station or f"file:{file.id}"].append(value)
+                if t is not None:
+                    raw_by_date[t].append(value)
+        for file in non_legacy_grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
+            raw = await bounded_to_thread(
+                gridded_query_service.get_raw_values, file, params.parameter, record_filter
+            )
+            for station, t, value in raw:
+                by_station[station or f"file:{file.id}"].append(value)
+                if t is not None:
+                    raw_by_date[t].append(value)
+
     station_names = sorted(by_station)[:6]
     box_plot = [BoxPlotSeries(station=name, values=by_station[name]) for name in station_names]
 
@@ -609,7 +816,13 @@ async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> Statist
     )
     series_query = _apply_viz_filters(series_query, params)
     series_result = await db.execute(series_query)
-    series = [(row.time, float(row.avg_value)) for row in series_result.all()]
+    series_by_date: dict[date, list[float]] = defaultdict(list)
+    for row in series_result.all():
+        series_by_date[row.time].append(float(row.avg_value))
+    for t, vals in raw_by_date.items():
+        series_by_date[t].extend(vals)
+
+    series = [(d, _mean(vals)) for d, vals in sorted(series_by_date.items())]
     values = [v for _, v in series]
 
     histogram = values

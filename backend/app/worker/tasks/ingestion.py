@@ -1,20 +1,23 @@
 import math
 import tempfile
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
+import psycopg
 import pyarrow.parquet as pq
 import structlog
 from celery.exceptions import SoftTimeLimitExceeded
 from geoalchemy2 import Geometry
-from sqlalchemy import cast, func, select
+from sqlalchemy import cast, delete, func, select
 
+from app.core.config import settings
 from app.core.database import get_sync_db
-from app.models.catalog import Dataset, DatasetFile, DatasetRecord, DatasetVariable, VariableDataType
+from app.models.catalog import Dataset, DatasetFile, DatasetRecord, DatasetVariable, StorageKind, VariableDataType
 from app.models.uploads import QualityIssue, Upload, UploadStatus
 from app.services.parsers import ParserError, get_parser_for_format
 from app.services.parsers.base import DataShape, ParsedFileMetadata, ProcessedArtifact
-from app.services.storage.keys import processed_key
+from app.services.storage.keys import processed_key, processed_prefix
 from app.services.storage.registry import default_bucket_for, get_storage_backend
 from app.worker.celery_app import celery_app
 
@@ -25,6 +28,27 @@ logger = structlog.get_logger(__name__)
 _NON_VARIABLE_SUFFIXES = ("_bnds", "_bounds")
 
 _RECORD_BATCH_SIZE = 5_000
+
+# DatasetRecord COPY commit size — benchmarked in
+# test_ingestion_benchmark.py against 250K/500K/1M rows at a 2M-row
+# scale: 250K was both the FASTEST (12,041 rows/s vs 10,078 at 500K and
+# 9,565 at 1M) and the most memory-bounded (+53MB peak RSS delta vs
+# +199MB and +378MB) — larger chunks held more Python row-tuples live at
+# once without a throughput benefit at this row width, so smaller
+# clearly won on every axis measured here. See that test file's module
+# docstring for the full measured numbers.
+_COPY_CHUNK_ROWS = 250_000
+
+_DEFAULT_QUALITY_FLAG = "normal"
+
+
+def _raw_sync_dsn() -> str:
+    """DATABASE_URL_SYNC carries SQLAlchemy's '+psycopg' dialect marker
+    (postgresql+psycopg://...), which a plain psycopg.connect() call
+    doesn't understand — strips it for the dedicated COPY connection
+    below, which is intentionally NOT the SQLAlchemy-managed sync_engine
+    (see _write_dataset_records' docstring for why)."""
+    return settings.DATABASE_URL_SYNC.replace("postgresql+psycopg://", "postgresql://")
 
 # Matches app.models.catalog._MAX_SAMPLED_DISTINCT_VALUES — kept as a
 # separate constant here rather than importing the private one, since this
@@ -50,12 +74,24 @@ class IngestionCancelled(Exception):
     Carries whatever processed-artifact storage location (if any) was
     already written before cancellation was detected, so the cleanup
     handler knows what to delete without needing dataset_file.file_metadata
-    (which is only set — and only committed — after DatasetRecord writes
-    succeed, i.e. after the point cancellation can still interrupt)."""
+    (which is only set — and only committed — after this point, i.e.
+    after cancellation can still interrupt).
 
-    def __init__(self, *, processed_bucket: str | None = None, processed_key: str | None = None):
+    processed_is_prefix distinguishes a single-object artifact (Parquet/
+    COG — cleaned up via storage.delete()) from a Zarr store's many
+    chunk objects under a shared prefix (PLAN.md Phase 5 — cleaned up via
+    storage.delete_prefix() instead)."""
+
+    def __init__(
+        self,
+        *,
+        processed_bucket: str | None = None,
+        processed_key: str | None = None,
+        processed_is_prefix: bool = False,
+    ):
         self.processed_bucket = processed_bucket
         self.processed_key = processed_key
+        self.processed_is_prefix = processed_is_prefix
         super().__init__("Ingestion cancelled")
 
 
@@ -67,6 +103,7 @@ def _checkpoint(
     pct: int | None = None,
     written_processed_bucket: str | None = None,
     written_processed_key: str | None = None,
+    written_processed_is_prefix: bool = False,
 ) -> None:
     """Re-reads Upload.status from the DB and raises IngestionCancelled if
     it's been flipped to CANCELLED since this task started. celery's own
@@ -88,12 +125,47 @@ def _checkpoint(
     db.refresh(upload)
     if upload.status == UploadStatus.CANCELLED.value:
         raise IngestionCancelled(
-            processed_bucket=written_processed_bucket, processed_key=written_processed_key
+            processed_bucket=written_processed_bucket,
+            processed_key=written_processed_key,
+            processed_is_prefix=written_processed_is_prefix,
         )
     if stage is not None:
         upload.progress_stage = stage
         upload.progress_pct = pct
         db.commit()
+
+
+def _set_upload_terminal_state(upload_id: str | None, *, status: str, error_message: str | None = None) -> None:
+    """Persists Upload.status/.error_message on a BRAND NEW session,
+    never the session that was active when a failure occurred. Verified
+    live (see the "con june all day.mat" incident this fixes): a
+    SoftTimeLimitExceeded — or any exception — can leave the original
+    session's underlying DBAPI connection in a broken state
+    (psycopg.OperationalError: "another command is already in
+    progress"), and attempting the terminal-state commit on THAT session
+    can itself raise (PendingRollbackError cascading into
+    OperationalError), leaving Upload permanently stuck at
+    status=processing. A fresh get_sync_db() call opens an independent
+    connection from the pool, so this write's success never depends on
+    whatever state the failed ingestion attempt left its own session in.
+    """
+    if not upload_id:
+        return
+    try:
+        with get_sync_db() as fresh_db:
+            upload = fresh_db.get(Upload, upload_id)
+            if upload is not None:
+                upload.status = status
+                if error_message is not None:
+                    upload.error_message = error_message
+                fresh_db.commit()
+    except Exception:
+        # This is the last-resort terminal-state write — if even a brand
+        # new session/connection can't reach the DB at all (e.g. Postgres
+        # itself is down), there is nothing further this function can do;
+        # log and move on rather than raise a second exception on top of
+        # whatever caused the original failure.
+        logger.exception("ingestion.terminal_state_write_failed", upload_id=upload_id, status=status)
 
 
 @celery_app.task(name="ingestion.process_dataset_file", bind=True, max_retries=2)
@@ -130,16 +202,27 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
             result = _run_ingestion(db, dataset_file, upload=upload)
         except IngestionCancelled as exc:
             logger.info("ingestion.cancelled", dataset_file_id=dataset_file_id)
-            _cleanup_cancelled_ingestion(
-                db,
-                dataset_file,
-                processed_bucket=exc.processed_bucket,
-                processed_key=exc.processed_key,
+            try:
+                _cleanup_cancelled_ingestion(
+                    db,
+                    dataset_file,
+                    processed_bucket=exc.processed_bucket,
+                    processed_key=exc.processed_key,
+                    processed_is_prefix=exc.processed_is_prefix,
+                )
+            except Exception:
+                # Best-effort — db's session/connection may itself be
+                # unhealthy at this point. The terminal-state write below
+                # uses a fresh session regardless, so Upload still
+                # reliably reaches CANCELLED even if this cleanup failed;
+                # any DatasetRecord rows this run wrote remain deletable
+                # later by dataset_file_id (they are never silently
+                # treated as valid — DatasetFile itself failed to reach
+                # its success commit).
+                logger.exception("ingestion.cancel_cleanup_failed", dataset_file_id=dataset_file_id)
+            _set_upload_terminal_state(
+                upload_id, status=UploadStatus.CANCELLED.value, error_message="Cancelled during processing."
             )
-            if upload:
-                upload.status = UploadStatus.CANCELLED.value
-                upload.error_message = "Cancelled during processing."
-                db.commit()
             return {"status": "cancelled"}
         except ParserError as exc:
             logger.warning(
@@ -147,10 +230,7 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
                 dataset_file_id=dataset_file_id,
                 reason=str(exc),
             )
-            if upload:
-                upload.status = UploadStatus.FAILED.value
-                upload.error_message = str(exc)
-                db.commit()
+            _set_upload_terminal_state(upload_id, status=UploadStatus.FAILED.value, error_message=str(exc))
             return {"status": "failed", "reason": str(exc)}
         except SoftTimeLimitExceeded:
             # Phase 2: the per-dispatch soft time limit (celery_app.py's
@@ -158,33 +238,44 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
             # actual size) was exceeded — a clear, specific reason rather
             # than falling through to the generic "Unexpected error"
             # message below. Whatever this run had already written to the
-            # DB is cleaned up the same way an explicit cancellation is
-            # (db.rollback() + delete the DatasetFile row) — from the
-            # data's perspective it's the identical situation: ingestion
-            # did not finish, nothing partial should be left behind as if
-            # it had. Unlike a checkpoint-detected cancellation, a soft
-            # time limit can fire at any point, not only at a known
-            # checkpoint boundary, so this cannot reliably identify (and
-            # therefore cannot delete) a processed/ object that might have
-            # just been written — a rare, documented gap versus a
-            # deliberate cancellation's precise cleanup.
+            # DB is cleaned up the same way an explicit cancellation is —
+            # from the data's perspective it's the identical situation:
+            # ingestion did not finish, nothing partial should be left
+            # behind as if it had. Unlike a checkpoint-detected
+            # cancellation, a soft time limit can fire at any point, not
+            # only at a known checkpoint boundary, so this cannot
+            # reliably identify (and therefore cannot delete) a
+            # processed/ object that might have just been written — a
+            # rare, documented gap versus a deliberate cancellation's
+            # precise cleanup.
+            #
+            # Live-confirmed failure mode this specifically fixes: a
+            # SoftTimeLimitExceeded raised mid-COPY-chunk-commit can leave
+            # db's underlying DBAPI connection in a broken state
+            # ("another command is already in progress"), making the
+            # cleanup call below itself raise — caught here so the
+            # terminal-state write still happens on a fresh session
+            # regardless.
             logger.warning("ingestion.soft_time_limit_exceeded", dataset_file_id=dataset_file_id)
-            _cleanup_cancelled_ingestion(db, dataset_file, processed_bucket=None, processed_key=None)
-            if upload:
-                upload.status = UploadStatus.FAILED.value
-                upload.error_message = (
+            try:
+                _cleanup_cancelled_ingestion(db, dataset_file, processed_bucket=None, processed_key=None)
+            except Exception:
+                logger.exception("ingestion.timeout_cleanup_failed", dataset_file_id=dataset_file_id)
+            _set_upload_terminal_state(
+                upload_id,
+                status=UploadStatus.FAILED.value,
+                error_message=(
                     "Processing exceeded the time limit for a file of this size. "
                     "This may indicate an unusually large or complex file — contact an administrator "
                     "if this persists."
-                )
-                db.commit()
+                ),
+            )
             return {"status": "failed", "reason": "soft_time_limit_exceeded"}
         except Exception as exc:
             logger.exception("ingestion.unexpected_error", dataset_file_id=dataset_file_id)
-            if upload:
-                upload.status = UploadStatus.FAILED.value
-                upload.error_message = f"Unexpected error during processing: {exc}"
-                db.commit()
+            _set_upload_terminal_state(
+                upload_id, status=UploadStatus.FAILED.value, error_message=f"Unexpected error during processing: {exc}"
+            )
             return {"status": "failed", "reason": str(exc)}
 
         if upload:
@@ -199,6 +290,9 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
             if result.get("shape") == DataShape.RASTER.value:
                 count_desc = f"{result['record_count']} pixels"
                 names_desc = "band"
+            elif result.get("shape") == DataShape.GRIDDED.value:
+                count_desc = f"{result['record_count']} grid elements"
+                names_desc = "variable"
             else:
                 count_desc = f"{result['record_count']} records"
                 names_desc = "variable"
@@ -248,68 +342,86 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         _checkpoint(db, upload, stage="parsing", pct=None)
 
         metadata = parser.parse(raw_local_path)
-        # Format-agnostic: tabular parsers write Parquet, GeoTIFF writes a
-        # re-tiled COG — the ingestion task doesn't need to know which.
+        # Format-agnostic: tabular parsers write Parquet, GRIDDED parsers
+        # write Zarr, GeoTIFF writes a re-tiled COG — the ingestion task
+        # doesn't need to know which, except to decide how to upload it
+        # (one object vs. many chunk objects under a prefix) below.
         artifact = parser.to_processed(raw_local_path, tmp_dir_path)
 
         # Checkpoint 2: after conversion, before uploading the processed
-        # artifact and writing DatasetRecord rows — the two steps most
-        # worth skipping if cancellation arrived while conversion (the
-        # slowest step for a large NetCDF/GeoTIFF) was running.
+        # artifact — the step most worth skipping if cancellation arrived
+        # while conversion (the slowest step for a large NetCDF/GeoTIFF)
+        # was running.
         _checkpoint(db, upload, stage="uploading_processed", pct=None)
 
-        processed_object_key = processed_key(
-            dataset_file.dataset_id, dataset_file.id, extension=artifact.file_extension
-        )
         processed_bucket = default_bucket_for(dataset_file.storage_backend)
-        with open(artifact.local_path, "rb") as f:
-            storage.put(
-                processed_bucket,
-                processed_object_key,
-                f,
-                content_type=artifact.content_type,
+
+        if artifact.is_zarr:
+            # PLAN.md Phase 5: a Zarr store is a directory of many small
+            # chunk + metadata files, not one blob — upload every file
+            # under artifact.local_dir as its own object under a shared
+            # prefix (enables genuine chunk-range reads later; a single
+            # zipped object would require a full download to read at
+            # all). processed_object_key stays None; the prefix is what
+            # gets recorded/cleaned-up/queried instead.
+            processed_object_key = None
+            processed_object_prefix = processed_prefix(dataset_file.dataset_id, dataset_file.id)
+            for chunk_file in artifact.local_dir.rglob("*"):
+                if not chunk_file.is_file():
+                    continue
+                relative = chunk_file.relative_to(artifact.local_dir)
+                with open(chunk_file, "rb") as f:
+                    storage.put(
+                        processed_bucket,
+                        f"{processed_object_prefix}/{relative.as_posix()}",
+                        f,
+                        content_type=artifact.content_type,
+                    )
+            storage_kind = StorageKind.CHUNKED_ARRAY.value
+        else:
+            processed_object_key = processed_key(
+                dataset_file.dataset_id, dataset_file.id, extension=artifact.file_extension
+            )
+            processed_object_prefix = None
+            with open(artifact.local_path, "rb") as f:
+                storage.put(
+                    processed_bucket,
+                    processed_object_key,
+                    f,
+                    content_type=artifact.content_type,
+                )
+            storage_kind = (
+                StorageKind.RASTER.value if metadata.shape == DataShape.RASTER else StorageKind.PARQUET.value
             )
 
-        # Checkpoint 3: after the processed artifact is durably in storage,
-        # before writing DatasetRecord rows to Postgres — if cancelled here,
-        # _cleanup_cancelled_ingestion (called by the caller's except
-        # IngestionCancelled handler) knows to delete this processed object
-        # since dataset_file.file_metadata (set below) hasn't been
-        # committed yet to point at it.
+        # Checkpoint 3: after the processed artifact is durably in storage
+        # — if cancelled here, _cleanup_cancelled_ingestion (called by the
+        # caller's except IngestionCancelled handler) knows to delete this
+        # processed object/prefix since dataset_file.file_metadata (set
+        # below) hasn't been committed yet to point at it.
         _checkpoint(
             db,
             upload,
-            stage="writing_records",
+            stage="writing_variable_registry",
             pct=None,
             written_processed_bucket=processed_bucket,
-            written_processed_key=processed_object_key,
+            written_processed_key=processed_object_key or processed_object_prefix,
+            written_processed_is_prefix=artifact.is_zarr,
         )
 
         # Must happen before the TemporaryDirectory context exits below —
-        # artifact.local_path (the Parquet file we just wrote and uploaded,
-        # for tabular formats) is deleted along with the whole tmp_dir the
-        # moment this `with` block ends, so this is the last point it's
-        # still readable.
+        # artifact.local_path/local_dir is deleted along with the whole
+        # tmp_dir the moment this `with` block ends, so this is the last
+        # point it's still readable.
         #
-        # Zarr-backed artifacts (large multidimensional NetCDF, Phase 2)
-        # are excluded from both the Parquet-reading functions below —
-        # _write_dataset_records/_write_variable_registry's per-variable
-        # stats both read artifact.local_path as a Parquet file, which a
-        # .zarr.zip is not. Same reasoning as why raster/GeoTIFF already
-        # skips _write_dataset_records: a Zarr-backed dataset has no tidy-
-        # table row concept to melt into DatasetRecord rows at all; its
-        # data stays queryable through the Zarr store itself, not via
-        # per-row Postgres records.
-        records_written = 0
-        if metadata.shape == DataShape.TABULAR and not artifact.is_zarr:
-            records_written = _write_dataset_records(
-                db, dataset_file=dataset_file, metadata=metadata, artifact=artifact, upload=upload
-            )
-
-        # Runs for every format, including raster and Zarr-backed NetCDF —
-        # the schema registry records a GeoTIFF's bands (and a Zarr
-        # dataset's variables/dimensions, from ParsedFileMetadata alone,
-        # same as raster) even when no DatasetRecord rows were written.
+        # PLAN.md Phase 5: new ingestion NEVER writes DatasetRecord rows,
+        # for any format/shape — actual observation values live only in
+        # MinIO (Parquet/Zarr/COG), queried via tabular_query_service.py
+        # (DuckDB) or gridded_query_service.py (xarray), never via a
+        # row-per-observation SQL table. _write_dataset_records and its
+        # COPY writer remain in the codebase for the legacy/administrative
+        # path only (backfill_dataset_records.py, repairing pre-Phase-5
+        # data) — nothing in this live ingestion flow calls it.
         variables_registered = _write_variable_registry(
             db, dataset_file=dataset_file, metadata=metadata, artifact=artifact
         )
@@ -317,16 +429,18 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
     dataset_file.spatial_extent = _bbox_wkt(metadata) if _has_bbox(metadata) else None
     dataset_file.temporal_start = metadata.temporal_start
     dataset_file.temporal_end = metadata.temporal_end
+    dataset_file.storage_kind = storage_kind
 
-    # variables/record_count are the tabular-shaped view of "what does this
-    # file contain" — for a raster, bands stand in for variables and pixel
-    # dimensions stand in for a row count. Both get folded into the same
-    # dataset.parameters/record_count aggregates below so catalog search
-    # (Phase 3) doesn't need to know a file's shape to summarize a dataset.
-    content_names = metadata.variables if metadata.shape == DataShape.TABULAR else metadata.bands
+    # variables/record_count are the tabular/gridded-shaped view of "what
+    # does this file contain" — for a raster, bands stand in for
+    # variables and pixel dimensions stand in for a row count. All three
+    # get folded into the same dataset.parameters/record_count aggregates
+    # below so catalog search doesn't need to know a file's shape to
+    # summarize a dataset.
+    content_names = metadata.variables if metadata.shape != DataShape.RASTER else metadata.bands
     content_count = (
         metadata.record_count
-        if metadata.shape == DataShape.TABULAR
+        if metadata.shape != DataShape.RASTER
         else (metadata.pixel_width or 0) * (metadata.pixel_height or 0)
     )
 
@@ -339,14 +453,36 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         "pixel_width": metadata.pixel_width,
         "pixel_height": metadata.pixel_height,
         "processed_key": processed_object_key,
+        "processed_prefix": processed_object_prefix,
         "processed_bucket": processed_bucket,
+        "storage_kind": storage_kind,
         **{k: v for k, v in metadata.extra.items()},
     }
 
     dataset = db.get(Dataset, dataset_file.dataset_id)
     if dataset is not None:
-        dataset.temporal_start = _widen(dataset.temporal_start, metadata.temporal_start, take_min=True)
-        dataset.temporal_end = _widen(dataset.temporal_end, metadata.temporal_end, take_min=False)
+        # Reaching this point at all means this file's ingestion already
+        # succeeded — parse, to_processed, storage upload, and variable-
+        # registry write are all upstream, unguarded by any try/except in
+        # this function, so a ParserError/IngestionCancelled/other
+        # exception at any of those stages propagates out of
+        # _run_ingestion entirely (see process_dataset_file's try/except)
+        # and this whole block, including this bump, never executes for
+        # that attempt. That makes "did we get here" itself the correct
+        # success signal for Dataset.version — NOT content_count's
+        # truthiness, which was the original (wrong) gate: a genuinely
+        # successful ingestion of an empty/zero-content file (e.g. a
+        # header-only CSV — csv_parser.py explicitly supports this,
+        # "still produce a valid (empty) parquet output") left content_
+        # count falsy, so version silently never moved even though a new
+        # file, spatial_extent, temporal range, and parameters may have
+        # just been added to the dataset. Bumping unconditionally here
+        # means DatasetRequest.dataset_version (the coverage snapshot's
+        # staleness marker) can never miss a real, successful content
+        # change — while a failed or cancelled ingestion still can't
+        # reach this line at all, so version stays correctly frozen for
+        # those.
+        dataset.version = (dataset.version or 1) + 1
         if content_count:
             dataset.record_count = (dataset.record_count or 0) + content_count
         merged_params = set(dataset.parameters or [])
@@ -380,10 +516,11 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
 
     return {
         "shape": metadata.shape.value,
+        "storage_kind": storage_kind,
         "variables": content_names,
         "record_count": content_count,
         "processed_key": processed_object_key,
-        "dataset_records_written": records_written,
+        "processed_prefix": processed_object_prefix,
         "dataset_variables_registered": variables_registered,
     }
 
@@ -394,6 +531,7 @@ def _cleanup_cancelled_ingestion(
     *,
     processed_bucket: str | None,
     processed_key: str | None,
+    processed_is_prefix: bool = False,
 ) -> None:
     """Undoes everything a cancelled-mid-run _run_ingestion may have
     already written, so a cancelled upload never leaves an orphaned
@@ -404,25 +542,45 @@ def _cleanup_cancelled_ingestion(
       never committed to point at it (the commit happens after the
       checkpoint that would have caught the cancellation), so nothing else
       in the app knows this object exists; without this it would be a
-      silent orphan in the processed/ prefix forever.
-    - Any DatasetRecord rows this run already added via db.add_all() are
-      discarded by db.rollback() below rather than committed — the
-      _write_dataset_records batches were flushed (visible within this
-      transaction) but never committed, so a rollback fully undoes them.
+      silent orphan in the processed/ prefix forever. processed_is_prefix
+      (PLAN.md Phase 5) distinguishes a single-object Parquet/COG artifact
+      (storage.delete()) from a Zarr store's many chunk objects under a
+      shared prefix (storage.delete_prefix()) — deleting only the exact
+      key for a Zarr artifact would leave every other chunk object
+      orphaned.
+    - Any DatasetRecord rows this run already wrote are deleted
+      explicitly by dataset_file_id — NOT by relying on db.rollback().
+      New ingestion (Phase 5) never writes DatasetRecord rows at all, so
+      this is normally a no-op; kept as a safety net for the legacy/
+      administrative write path (backfill_dataset_records.py) that still
+      calls _write_dataset_records and therefore still needs this same
+      cleanup guarantee. _write_dataset_records commits each COPY chunk
+      durably as it writes, on a separate connection from this session
+      entirely, so a plain rollback here would NOT undo them — an
+      explicit delete-by-dataset_file_id is required. Scoped to this
+      exact dataset_file_id only — never touches another file's rows in
+      the same dataset.
     - The DatasetFile row itself (created before ingestion started, when
       the raw upload completed) is deleted — a cancelled upload must not
-      remain as an orphaned Dataset/DatasetFile shell. The raw object in
-      raw/ is deliberately NOT deleted here: it's the original uploaded
-      file, and per the storage-preservation guarantee raw files are only
-      ever removed via the explicit "permanently delete dataset" admin
-      action — an ingestion cancellation is not that.
+      remain as an orphaned Dataset/DatasetFile shell. Now safe to delete
+      only after its DatasetRecords are gone, since the FK is NOT ON
+      DELETE CASCADE (deliberately — see DatasetRecord.dataset_file_id's
+      docstring) and would otherwise raise IntegrityError. The raw object
+      in raw/ is deliberately NOT deleted here: it's the original
+      uploaded file, and per the storage-preservation guarantee raw files
+      are only ever removed via the explicit "permanently delete dataset"
+      admin action — an ingestion cancellation is not that.
     """
     db.rollback()
 
     if processed_bucket and processed_key:
         storage = get_storage_backend(dataset_file.storage_backend)
-        storage.delete(processed_bucket, processed_key)
+        if processed_is_prefix:
+            storage.delete_prefix(processed_bucket, processed_key)
+        else:
+            storage.delete(processed_bucket, processed_key)
 
+    db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_file_id == dataset_file.id))
     db.delete(dataset_file)
     db.commit()
 
@@ -520,6 +678,24 @@ def _write_dataset_records(
     detection today, so in practice this means: skip only if there's no
     usable time AND no usable lat/lon pair, since a dimension-less row
     (identified by nothing at all) is never useful to keep.
+
+    Writes via PostgreSQL COPY (psycopg3's native cursor.copy(), not ORM
+    INSERT) on a completely separate raw connection from `db` — verified
+    empirically (not assumed) that sharing db's underlying DBAPI
+    connection for a raw commit desynchronizes SQLAlchemy's own
+    transaction-state tracking for at least one operation (see
+    test_dataset_record_writer.py's session-safety regression test). A
+    fully independent connection makes that impossible: this function's
+    COPY connection and `db`'s ORM session never share any object, so a
+    commit on one can never desync the other. `_checkpoint`'s progress
+    writes continue exclusively on `db`, unaffected either way.
+
+    Idempotency: any DatasetRecord rows a PRIOR attempt at this exact
+    dataset_file already wrote are deleted (by dataset_file_id, never by
+    dataset_id — never touches another file's rows in the same dataset)
+    before this attempt writes anything. Safe no-op on a first attempt;
+    makes a retry of the same DatasetFile exactly-once regardless of how
+    many times it's retried.
     """
     lat_col = metadata.extra.get("lat_col")
     lon_col = metadata.extra.get("lon_col")
@@ -555,73 +731,104 @@ def _write_dataset_records(
     if not variable_columns:
         return 0
 
-    written = 0
-    batch: list[DatasetRecord] = []
-    # Known upfront from Parquet's own file metadata (no extra scan needed)
-    # — the denominator for real, moving percentage during this stage,
-    # which is typically the slowest one for a large tabular file.
+    # Idempotency: clear any rows a previous, incomplete attempt at this
+    # SAME DatasetFile already committed — on the existing ORM session,
+    # committed before the COPY connection opens, so a crash mid-COPY on
+    # a retry can never see "half old + half new" data.
+    db.execute(delete(DatasetRecord).where(DatasetRecord.dataset_file_id == dataset_file.id))
+    db.commit()
+
     total_source_rows = parquet_file.metadata.num_rows or 1
     rows_seen = 0
+    written = 0
 
-    def flush():
-        nonlocal batch
-        if batch:
-            db.add_all(batch)
-            db.flush()
-            batch = []
+    copy_columns = "id, dataset_id, dataset_file_id, time, lat, lon, parameter, value, quality_flag, format, geom"
+    copy_sql = f"COPY dataset_records ({copy_columns}) FROM STDIN"
 
-    for record_batch in parquet_file.iter_batches(batch_size=_RECORD_BATCH_SIZE):
-        table = record_batch.to_pydict()
-        row_count = len(table[time_col] if time_col else table[lat_col])
-        rows_seen += row_count
-        # One checkpoint per Parquet batch (every _RECORD_BATCH_SIZE source
-        # rows, not per DatasetRecord row written) — frequent enough for a
-        # genuinely moving percentage on a large file, without adding a DB
-        # round-trip per row.
-        _checkpoint(
-            db,
-            upload,
-            stage="writing_records",
-            pct=min(99, round(100 * rows_seen / total_source_rows)),
-        )
-        for i in range(row_count):
-            lat = table[lat_col][i] if lat_col else None
-            lon = table[lon_col][i] if lon_col else None
-            has_latlon = _is_finite_number(lat) and _is_finite_number(lon)
-            lat = float(lat) if has_latlon else None
-            lon = float(lon) if has_latlon else None
+    copy_conn = psycopg.connect(_raw_sync_dsn())
+    try:
+        chunk_rows: list[tuple] = []
+        last_committed_pct = 0
 
-            row_time = _resolve_row_time(table[time_col][i]) if time_col else None
+        def flush_chunk():
+            nonlocal chunk_rows, written, last_committed_pct
+            if not chunk_rows:
+                return
+            with copy_conn.cursor() as cur, cur.copy(copy_sql) as copy:
+                for row in chunk_rows:
+                    copy.write_row(row)
+            copy_conn.commit()
+            written += len(chunk_rows)
+            chunk_rows = []
+            # Progress is a function of rows scanned so far, not rows
+            # written (a row can be skipped for having no usable
+            # dimension) — but is only ever reported here, AFTER this
+            # chunk's COPY transaction has actually committed, never
+            # before (per the "no batch reported complete before its
+            # transaction commits" requirement).
+            last_committed_pct = min(99, round(100 * rows_seen / total_source_rows))
 
-            if row_time is None and not has_latlon:
-                # Neither dimension resolved for this row (e.g. a null/
-                # unparseable cell in an otherwise-present column) — this
-                # specific row has no way to be located in time or space,
-                # so it's skipped; other rows in the same file are
-                # unaffected.
-                continue
+        for record_batch in parquet_file.iter_batches(batch_size=_RECORD_BATCH_SIZE):
+            table = record_batch.to_pydict()
+            row_count = len(table[time_col] if time_col else table[lat_col])
+            rows_seen += row_count
 
-            for col in variable_columns:
-                value = table[col][i]
-                if not _is_finite_number(value):
+            for i in range(row_count):
+                lat = table[lat_col][i] if lat_col else None
+                lon = table[lon_col][i] if lon_col else None
+                has_latlon = _is_finite_number(lat) and _is_finite_number(lon)
+                lat = float(lat) if has_latlon else None
+                lon = float(lon) if has_latlon else None
+
+                row_time = _resolve_row_time(table[time_col][i]) if time_col else None
+
+                if row_time is None and not has_latlon:
+                    # Neither dimension resolved for this row (e.g. a
+                    # null/unparseable cell in an otherwise-present
+                    # column) — this specific row has no way to be
+                    # located in time or space, so it's skipped; other
+                    # rows in the same file are unaffected.
                     continue
-                batch.append(
-                    DatasetRecord(
-                        dataset_id=dataset_file.dataset_id,
-                        time=row_time,
-                        lat=lat,
-                        lon=lon,
-                        parameter=col,
-                        value=float(value),
-                        format=dataset_file.file_format,
-                        geom=f"SRID=4326;POINT({lon} {lat})" if has_latlon else None,
-                    )
-                )
-                written += 1
-                if len(batch) >= _RECORD_BATCH_SIZE:
-                    flush()
 
-    flush()
+                for col in variable_columns:
+                    value = table[col][i]
+                    if not _is_finite_number(value):
+                        continue
+                    chunk_rows.append(
+                        (
+                            str(uuid.uuid4()),
+                            str(dataset_file.dataset_id),
+                            str(dataset_file.id),
+                            row_time,
+                            lat,
+                            lon,
+                            col,
+                            float(value),
+                            _DEFAULT_QUALITY_FLAG,
+                            dataset_file.file_format,
+                            f"SRID=4326;POINT({lon} {lat})" if has_latlon else None,
+                        )
+                    )
+                    if len(chunk_rows) >= _COPY_CHUNK_ROWS:
+                        flush_chunk()
+
+            # One checkpoint per Parquet batch, same cadence the old
+            # per-row implementation used — reports the percentage as of
+            # the last COPY chunk that actually committed (never a
+            # not-yet-durable count), which for a small/medium file
+            # (never reaching one full _COPY_CHUNK_ROWS chunk) stays at 0
+            # until the trailing flush_chunk() below, then jumps once —
+            # correct per "never report a batch complete before its
+            # transaction commits," even though it's less granular than
+            # the old per-5K-row cadence for such files.
+            _checkpoint(db, upload, stage="writing_records", pct=last_committed_pct)
+
+        flush_chunk()
+        if written > 0:
+            _checkpoint(db, upload, stage="writing_records", pct=min(99, round(100 * written / total_source_rows)))
+    finally:
+        copy_conn.close()
+
     return written
 
 

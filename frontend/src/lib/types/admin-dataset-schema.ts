@@ -32,6 +32,26 @@ export interface DatasetSchemaReviewSummary {
   schema_reviewed_by_name: string | null;
 }
 
+// PLAN.md Phase 5 — how a DatasetFile's actual observation values are
+// stored/queried. Nullable: a pre-Phase-5 file not yet through the
+// best-effort backfill script shows null, never a fabricated guess.
+export type StorageKind = "row_records" | "parquet" | "chunked_array" | "raster" | null;
+
+export const STORAGE_KIND_LABELS: Record<NonNullable<StorageKind>, string> = {
+  row_records: "Database Rows (legacy)",
+  parquet: "Parquet",
+  chunked_array: "Zarr (chunked array)",
+  raster: "Raster (COG)",
+};
+
+export interface DatasetFileStorageSummary {
+  id: string;
+  file_name: string;
+  file_format: string | null;
+  storage_kind: StorageKind;
+  uploaded_at: string | null;
+}
+
 export interface DatasetSchemaDetail {
   dataset_id: string;
   dataset_code: string;
@@ -39,6 +59,7 @@ export interface DatasetSchemaDetail {
   schema_reviewed_at: string | null;
   schema_reviewed_by_name: string | null;
   variables: DatasetVariablePublic[];
+  files: DatasetFileStorageSummary[];
 }
 
 export interface DatasetSchemaReviewResult {

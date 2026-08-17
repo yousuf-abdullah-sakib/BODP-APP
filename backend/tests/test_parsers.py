@@ -194,13 +194,16 @@ class TestNetcdfParser:
         assert meta.record_count == 20
 
     def test_to_processed_round_trips(self, netcdf_file, tmp_path):
+        """netcdf_file is genuinely gridded ((time, lat, lon)-indexed) —
+        Phase 5 (shape-based routing) means to_processed() writes a real
+        Zarr store for it, regardless of its small size, not Parquet."""
         parser = get_parser_for_format("nc")
         artifact = parser.to_processed(netcdf_file, tmp_path)
-        assert artifact.row_count == 20
-        assert artifact.file_extension == "parquet"
-        df = pd.read_parquet(artifact.local_path)
-        assert "sea_surface_temp" in df.columns
-        assert "lat" in df.columns and "lon" in df.columns
+        assert artifact.is_zarr is True
+        assert artifact.local_dir is not None and artifact.local_dir.exists()
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert "sea_surface_temp" in reopened.data_vars
+        assert "lat" in reopened.coords and "lon" in reopened.coords
 
     def test_detects_valid_time_coordinate(self, netcdf_file_valid_time):
         """Regression test for the real Model Wave Data ERA5 file: the time
@@ -214,12 +217,11 @@ class TestNetcdfParser:
         assert meta.extra["time_col"] == "valid_time"
 
     def test_to_processed_spans_multiple_time_chunks(self, tmp_path):
-        """Phase 2 regression test: proves the Dask/time-chunked rewrite
-        produces the exact same row count/values whether a file fits in
-        one chunk (_TIME_CHUNK_SIZE=24) or spans several — not just
-        correct on the 5-timestep fixture, which would also pass with the
-        old single ds.to_dataframe() call and wouldn't catch a chunking
-        bug."""
+        """Phase 2 regression test (updated for Phase 5's shape-based
+        routing): proves the Dask/time-chunked Zarr write produces the
+        exact same values whether a file fits in one chunk
+        (_TIME_CHUNK_SIZE=24) or spans several — not just correct on the
+        5-timestep fixture."""
         from app.services.parsers.netcdf_parser import _TIME_CHUNK_SIZE
 
         n_time = _TIME_CHUNK_SIZE * 2 + 10  # spans 3 chunks
@@ -237,29 +239,24 @@ class TestNetcdfParser:
 
         parser = get_parser_for_format("nc")
         artifact = parser.to_processed(p, tmp_path)
-        assert artifact.is_zarr is False
-        assert artifact.row_count == n_time * 2 * 2
+        assert artifact.is_zarr is True
 
-        df = pd.read_parquet(artifact.local_path)
-        assert len(df) == n_time * 2 * 2
-        assert df["sea_surface_temp"].min() == pytest.approx(sst.min(), rel=1e-5)
-        assert df["sea_surface_temp"].max() == pytest.approx(sst.max(), rel=1e-5)
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"time": n_time, "lat": 2, "lon": 2}
+        assert np.allclose(reopened["sea_surface_temp"].values, sst, rtol=1e-5)
 
-    def test_large_dataset_produces_zarr_instead_of_parquet(self, tmp_path, monkeypatch):
-        """Above the size heuristic, to_processed() must switch to a
-        chunked Zarr store rather than attempting a flattened Parquet
-        conversion — verifies both the format switch and that the
+    def test_gridded_dataset_produces_zarr_regardless_of_size(self, tmp_path):
+        """Phase 5's core routing rule: GRIDDED data always writes Zarr,
+        with no size threshold — a tiny 4x4 grid gets the exact same
+        treatment as a huge one. Verifies both the format and that the
         resulting Zarr store round-trips back to the exact same data via
         xarray, proving it's a genuinely valid, readable store and not
-        just "a file got written somewhere."""
-        import zarr
-
+        just "a file got written somewhere." Replaces the old size-
+        threshold-monkeypatched test now that there is no threshold left
+        to monkeypatch."""
         from app.services.parsers.netcdf_parser import NetcdfParser
-        import app.services.parsers.netcdf_parser as netcdf_module
 
-        monkeypatch.setattr(netcdf_module, "_ZARR_THRESHOLD_ELEMENTS", 10)
-
-        n_time = 20
+        n_time = 3  # deliberately small — proves size is not the gate
         times = pd.date_range("2024-01-01", periods=n_time, freq="D")
         lats = np.linspace(20.0, 21.0, 4)
         lons = np.linspace(90.0, 91.0, 4)
@@ -269,20 +266,49 @@ class TestNetcdfParser:
             {"sea_surface_temp": (("time", "lat", "lon"), sst)},
             coords={"time": times, "lat": lats, "lon": lons},
         )
-        p = tmp_path / "large.nc"
+        p = tmp_path / "small_gridded.nc"
         ds.to_netcdf(p)
 
         parser = NetcdfParser()
+        meta = parser.parse(p)
+        assert meta.shape == DataShape.GRIDDED
+
         artifact = parser.to_processed(p, tmp_path)
         assert artifact.is_zarr is True
-        assert artifact.file_extension == "zarr.zip"
         assert artifact.row_count is None
-        assert artifact.local_path.exists()
+        assert artifact.local_dir is not None and artifact.local_dir.exists()
 
-        store = zarr.storage.ZipStore(str(artifact.local_path), mode="r")
-        reopened = xr.open_zarr(store, consolidated=False)
+        reopened = xr.open_zarr(artifact.local_dir)
         assert dict(reopened.sizes) == {"time": n_time, "lat": 4, "lon": 4}
         assert np.allclose(reopened["sea_surface_temp"].values, sst, rtol=1e-5)
+
+    def test_tabular_shaped_netcdf_still_produces_parquet(self, tmp_path):
+        """Regression guard for the other half of shape-based routing: a
+        NetCDF whose data variable is only indexed by a single shared
+        'obs' dimension (not a real multi-axis grid) must remain TABULAR
+        and produce Parquet, exactly as before — proves the GRIDDED
+        detection doesn't over-fire on genuinely tabular NetCDF."""
+        n = 10
+        times = pd.date_range("2024-01-01", periods=n)
+        lats = np.linspace(20.0, 21.0, n)
+        lons = np.linspace(90.0, 91.0, n)
+        sst = np.random.default_rng(3).random(n) * 30
+        ds = xr.Dataset(
+            {"sea_surface_temp": (("obs",), sst)},
+            coords={"time": ("obs", times), "lat": ("obs", lats), "lon": ("obs", lons)},
+        )
+        p = tmp_path / "tabular.nc"
+        ds.to_netcdf(p)
+
+        parser = get_parser_for_format("nc")
+        meta = parser.parse(p)
+        assert meta.shape == DataShape.TABULAR
+
+        artifact = parser.to_processed(p, tmp_path)
+        assert artifact.is_zarr is False
+        assert artifact.row_count == n
+        df = pd.read_parquet(artifact.local_path)
+        assert len(df) == n
 
     def test_rejects_text_file_disguised_as_netcdf(self, tmp_path):
         fake = tmp_path / "fake.nc"
@@ -488,13 +514,13 @@ class TestMatGriddedStructParser:
         assert meta.extra["units"] == "unit"
 
         artifact = parser.to_processed(p, tmp_path)
-        assert artifact.row_count == nt * ny * nx
-        df = pd.read_parquet(artifact.local_path)
-        assert set(df.columns) == {"time", "lat", "lon", "TestVariable"}
-        assert len(df) == nt * ny * nx
+        assert artifact.is_zarr is True
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"time": nt, "y": ny, "x": nx}
+        assert "TestVariable" in reopened.data_vars
         # Geographic coordinates pass through unconverted.
-        assert df["lon"].min() == pytest.approx(x.min())
-        assert df["lat"].max() == pytest.approx(y.max())
+        assert float(reopened["lon"].min()) == pytest.approx(x.min())
+        assert float(reopened["lat"].max()) == pytest.approx(y.max())
 
     def test_parses_projected_gridded_struct_uses_default_crs(self, tmp_path):
         # UTM-46N-scale values (meters, not degrees) — no embedded CRS in
@@ -567,7 +593,9 @@ class TestMatGriddedStructParser:
         assert meta.dimensions == {"y": ny, "x": nx, "time": nt}
 
         artifact = parser.to_processed(p, tmp_path)
-        assert artifact.row_count == nt * ny * nx
+        assert artifact.is_zarr is True
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"time": nt, "y": ny, "x": nx}
 
     def test_no_time_field_treated_as_single_snapshot(self, geographic_grid, tmp_path):
         x, y = geographic_grid
@@ -586,9 +614,10 @@ class TestMatGriddedStructParser:
         assert meta.dimensions == {"y": ny, "x": nx}
 
         artifact = parser.to_processed(p, tmp_path)
-        assert artifact.row_count == ny * nx
-        df = pd.read_parquet(artifact.local_path)
-        assert "time" not in df.columns
+        assert artifact.is_zarr is True
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"y": ny, "x": nx}
+        assert "time" not in reopened.coords
 
     def test_no_name_field_falls_back_to_struct_variable_name(self, geographic_grid, tmp_path):
         x, y = geographic_grid
@@ -648,7 +677,9 @@ class TestMatGriddedStructParser:
         assert meta.dimensions == {"y": 5, "x": 5, "time": nt}
 
         artifact = parser.to_processed(p, tmp_path)
-        assert artifact.row_count == nt * 5 * 5
+        assert artifact.is_zarr is True
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"time": nt, "y": 5, "x": 5}
 
     def test_ambiguous_shape_falls_back_to_flat_tabular_parser(self, tmp_path):
         """When time length equals both spatial dimensions (nt == ny ==
@@ -706,7 +737,9 @@ class TestMatGriddedStructParser:
         assert meta.extra["source_crs"] == "EPSG:32646"
 
         artifact = parser.to_processed(self._REFERENCE_FILE, tmp_path)
-        assert artifact.row_count == 372 * 180 * 180
+        assert artifact.is_zarr is True
+        reopened = xr.open_zarr(artifact.local_dir)
+        assert dict(reopened.sizes) == {"time": 372, "y": 180, "x": 180}
 
 
 class TestGeoTiffParser:

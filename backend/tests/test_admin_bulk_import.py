@@ -131,9 +131,12 @@ class TestStartEndpoint:
     ):
         """Same acceptance criterion as the CLI's own equivalent test —
         the Admin Panel entry point must produce an identical
-        DatasetFile/DatasetRecord/DatasetVariable result, since it's a
-        different ENTRY POINT into the same one bulk-import
-        implementation, not a parallel code path."""
+        DatasetFile/DatasetVariable result, since it's a different ENTRY
+        POINT into the same one bulk-import implementation, not a
+        parallel code path. PLAN.md Phase 5: no ingestion path writes
+        DatasetRecord rows anymore, for any entry point — record_count is
+        still tracked on Dataset (from the parser's own metadata), just
+        never materialized as SQL rows."""
         dataset_id = await _create_dataset(client, admin_headers)
         source = tmp_path / "start_ingestion_test.csv"
         source.write_bytes(_make_csv_bytes())
@@ -154,6 +157,7 @@ class TestStartEndpoint:
             dataset_file = await db.get(DatasetFile, upload.dataset_file_id)
             assert dataset_file.file_metadata is not None
             assert "sea_surface_temp" in dataset_file.file_metadata["variables"]
+            assert dataset_file.storage_kind == "parquet"
 
             dataset = await db.get(Dataset, uuid.UUID(dataset_id))
             assert dataset.record_count == 15
@@ -163,7 +167,7 @@ class TestStartEndpoint:
                     select(DatasetRecord).where(DatasetRecord.dataset_id == uuid.UUID(dataset_id))
                 )
             ).scalars().all()
-            assert len(records) == 15
+            assert records == []
 
     async def test_missing_path_rejected_before_any_row_created(self, client, admin_headers, tmp_path):
         dataset_id = await _create_dataset(client, admin_headers)

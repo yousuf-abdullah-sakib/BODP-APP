@@ -14,11 +14,21 @@ class ParserError(Exception):
 
 class DataShape(StrEnum):
     """What kind of data a parsed file represents. Drives which processed
-    artifact form is correct (Parquet vs. raster) and which ParsedFileMetadata
-    fields are populated — added when generalizing the pipeline for GeoTIFF
-    (raster) alongside the original tabular formats (CSV/NetCDF/.mat)."""
+    artifact form is correct (Parquet vs. Zarr vs. raster) and which
+    ParsedFileMetadata fields are populated.
+
+    GRIDDED (Phase 5 — Storage & Query Architecture): a genuinely dense,
+    regular array — NetCDF with real spatial grid dimensions, or a
+    MATLAB struct matched by mat_gridded_struct.find_gridded_struct_field.
+    Set explicitly by the parser at parse() time from the data's actual
+    shape, never inferred later from element count — a small grid is
+    still GRIDDED; there is no size below which flattening it into rows
+    is correct (see PLAN.md Phase 5's "Guiding decision"). TABULAR
+    remains for genuinely sparse/tabular data (CSV, non-gridded .mat,
+    NetCDF whose coordinates don't form a real grid)."""
 
     TABULAR = "tabular"
+    GRIDDED = "gridded"
     RASTER = "raster"
 
 
@@ -69,26 +79,40 @@ class ProcessedArtifact:
     GeoTIFF produces a re-tiled Cloud-Optimized GeoTIFF instead, and the
     ingestion pipeline no longer assumes a row count applies to every format.
 
-    Phase 2: large, genuinely multidimensional NetCDF may produce a Zarr
-    store instead of a flattened Parquet table (see netcdf_parser.py's
-    size/dimensionality heuristic) — `is_zarr=True` signals this so the
-    ingestion pipeline knows NOT to attempt _write_dataset_records against
-    it (that function reads a Parquet file; a Zarr-backed file has no
-    tidy-table row concept at all, same reasoning as why raster/GeoTIFF is
-    already skipped). A Zarr store is architecturally a directory of many
-    chunk objects, not one blob (see FileParser's docstring below) — rather
-    than changing the storage layer to accept multi-object artifacts,
-    `local_path` still points at a single file: the Zarr store zipped into
-    one `.zarr.zip` container, which Zarr's own tooling (and xarray) can
-    read directly without unpacking. This is the "simpler near-term bridge"
-    this interface's docstring already anticipated.
+    Phase 5 (Storage & Query Architecture): GRIDDED data always produces a
+    Zarr store — `is_zarr=True` signals this so the ingestion pipeline
+    knows NOT to attempt _write_dataset_records against it (that function
+    reads a Parquet file; a Zarr-backed file has no tidy-table row concept
+    at all, same reasoning as why raster/GeoTIFF is already skipped).
+
+    A Zarr store is architecturally a directory of many chunk objects, not
+    one blob. Phase 2 bridged this by zipping the whole store into one
+    `.zarr.zip` object — simple, but StorageService.get() has no Range
+    support, so reading it back meant downloading the entire store first,
+    defeating the point of chunked storage. Phase 5 replaces that: a Zarr
+    artifact is now written directly to `local_dir` (a real directory —
+    zarr's own native on-disk layout, one file per chunk + per-array
+    metadata), and the ingestion task uploads every file under it to a
+    shared MinIO prefix (`processed_prefix()`) as individual objects,
+    enabling genuine chunk-range reads via ordinary per-object GETs.
+    `local_path` remains the field non-Zarr formats (Parquet, COG) use for
+    their single-object artifact; `local_dir` is populated instead
+    (`local_path` left None) when `is_zarr=True`.
     """
 
-    local_path: Path
-    content_type: str
-    file_extension: str  # no leading dot, e.g. "parquet", "cog.tif", "zarr.zip"
+    local_path: Path | None = None
+    local_dir: Path | None = None  # populated instead of local_path when is_zarr=True
+    content_type: str = "application/octet-stream"
+    file_extension: str = ""  # no leading dot, e.g. "parquet", "cog.tif" — unused when is_zarr=True
     row_count: int | None = None  # tabular (Parquet) only
     is_zarr: bool = False
+
+    def __post_init__(self) -> None:
+        if self.is_zarr:
+            if self.local_dir is None:
+                raise ValueError("ProcessedArtifact(is_zarr=True) requires local_dir")
+        elif self.local_path is None:
+            raise ValueError("ProcessedArtifact(is_zarr=False) requires local_path")
 
 
 class FileParser(ABC):
@@ -103,16 +127,13 @@ class FileParser(ABC):
     - Zarr as an UPLOAD format (raw/ input) is still architecturally
       deferred — a Zarr store as the *source* file is a directory of many
       small chunk objects, not one blob, and would need the upload
-      endpoint/raw_key()/storage layer to accept a directory tree or a
-      `.zarr.zip` container as raw input. That remains future work.
-    - Zarr as a PROCESSED/OUTPUT format (Phase 2), however, IS implemented:
-      NetcdfParser.to_processed() writes large, genuinely multidimensional
-      datasets as a Zarr store zipped into a single `.zarr.zip`
-      ProcessedArtifact (is_zarr=True) — the "simpler bridge" this note
-      used to only anticipate. This works today specifically because
-      to_processed()'s OUTPUT already flows through this interface's
-      existing single-local_path contract; it's the raw UPLOAD path that
-      still needs the directory-tree/storage-layer change described above.
+      endpoint/raw_key()/storage layer to accept a directory tree as raw
+      input. That remains future work.
+    - Zarr as a PROCESSED/OUTPUT format (Phase 5) IS fully implemented:
+      any parser detecting DataShape.GRIDDED data writes a real Zarr store
+      (multi-object, one file per chunk) via `ProcessedArtifact.local_dir`
+      — see that dataclass's docstring for the object-per-chunk layout and
+      why it replaced Phase 2's zipped-single-object bridge.
     """
 
     #: File extensions (lowercase, no leading dot) this parser declares
