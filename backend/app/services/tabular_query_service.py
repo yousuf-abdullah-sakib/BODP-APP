@@ -316,9 +316,13 @@ def _numeric_source_columns(con: duckdb.DuckDBPyConnection, glob: str) -> set[st
 def _resolution_trunc(resolution: str) -> str:
     """DuckDB's date_trunc part names match Postgres' exactly for every
     resolution Visualize uses except 'seasonal' (a Bangladesh 4-season
-    concept with no native trunc unit on either engine — visualize_service
-    already buckets that case client-side from raw series, not via SQL
-    truncation, on the legacy path too)."""
+    concept with no native trunc unit on either engine). Callers must
+    special-case "seasonal" themselves (see get_timeseries_with_counts),
+    bucketing day-level rows via visualize_service.season_bucket_date
+    instead of using this function's output for that case — this mirrors
+    the legacy SQL path's own get_timeseries in visualize_service.py
+    exactly, so every storage tier agrees on the same (year, season)
+    buckets for resolution="seasonal"."""
     return {"daily": "day", "monthly": "month", "annual": "year"}.get(resolution, "month")
 
 
@@ -354,6 +358,32 @@ def get_timeseries_with_counts(
             return [], source_columns
         melted_sql = _base_melted_sql(table)
         where_sql, params = _build_where(f, columns=source_columns)
+
+        if resolution == "seasonal":
+            # No native SQL trunc unit for the Bangladesh 4-season
+            # definition — group by real day-level rows in SQL, then
+            # re-bucket into (year, season) in Python via the one
+            # canonical helper every storage tier shares.
+            from app.services.visualize_service import season_bucket_date
+
+            query = (
+                f"SELECT date_trunc('day', time) AS bucket, AVG(value) AS avg_value, "
+                f"COUNT(*) AS n FROM {melted_sql} WHERE parameter = ? AND {where_sql} "
+                f"GROUP BY bucket ORDER BY bucket"
+            )
+            rows = con.execute(query, [parameter, *params]).fetchall()
+            weighted: dict[date_type, list[float]] = {}
+            for bucket, avg, n in rows:
+                day = bucket.date() if hasattr(bucket, "date") else bucket
+                season_date = season_bucket_date(day)
+                total, count = weighted.get(season_date, (0.0, 0))
+                weighted[season_date] = (total + float(avg) * n, count + n)
+            return [
+                (season_date, total / count, int(count))
+                for season_date, (total, count) in sorted(weighted.items())
+                if count > 0
+            ], source_columns
+
         trunc_unit = _resolution_trunc(resolution)
         query = (
             f"SELECT date_trunc('{trunc_unit}', time) AS bucket, AVG(value) AS avg_value, "

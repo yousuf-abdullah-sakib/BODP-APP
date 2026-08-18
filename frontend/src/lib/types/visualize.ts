@@ -125,6 +125,10 @@ export interface ScatterResult {
   y: number[];
   r: number;
   regression: RegressionResult;
+  /** Paired sample size backing r/regression — x.length === y.length === n. */
+  n: number;
+  /** How the two parameters' observations were paired (currently always "exact_date_match"). */
+  pairing_method: string;
 }
 
 export interface CorrelationMatrix {

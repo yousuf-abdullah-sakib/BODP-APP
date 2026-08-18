@@ -360,7 +360,30 @@ def get_timeseries_aggregate(
         spatial_dims = [d for d in data_array.dims if d != "time"]
         spatial_mean = data_array.mean(dim=spatial_dims) if spatial_dims else data_array
 
-        freq = {"daily": "1D", "monthly": "1MS", "seasonal": "1QS", "annual": "1YS"}[resolution]
+        if resolution == "seasonal":
+            # pandas has no offset alias for the app's Bangladesh
+            # 4-season definition (its own "1QS" is an ordinary calendar
+            # quarter, Jan-Mar/Apr-Jun/Jul-Sep/Oct-Dec) — resample to
+            # daily first, then re-bucket into (year, season) in Python
+            # via the same canonical helper the legacy SQL and DuckDB
+            # paths use, so every storage tier agrees on identical
+            # buckets for the same underlying dates.
+            from app.services.visualize_service import season_bucket_date
+
+            daily = spatial_mean.resample(time="1D").mean().compute()
+            weighted: dict[date_type, list[float]] = {}
+            for t, v in zip(daily["time"].values, daily.values, strict=True):
+                if np.isnan(v):
+                    continue
+                day = date_type.fromisoformat(np.datetime_as_string(t, unit="D"))
+                season_date = season_bucket_date(day)
+                total, count = weighted.get(season_date, (0.0, 0))
+                weighted[season_date] = (total + float(v), count + 1)
+            return sorted(
+                (season_date, total / count) for season_date, (total, count) in weighted.items() if count > 0
+            )
+
+        freq = {"daily": "1D", "monthly": "1MS", "annual": "1YS"}[resolution]
         resampled = spatial_mean.resample(time=freq).mean()
         resampled = resampled.compute()
 

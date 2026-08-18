@@ -122,8 +122,44 @@ class TestTimeSeries:
         assert body["stats"]["min"] == pytest.approx(1.0)
         assert body["stats"]["max"] == pytest.approx(12.0)
         assert body["stats"]["count"] == 12
-        # linreg against index 0..11 of values 1..12 has slope=1 exactly.
-        assert body["stats"]["trend_per_year"] == pytest.approx(12.0)
+        # Regression is against real elapsed time (fractional years since
+        # the first bucket), not bucket index — so this is no longer
+        # exactly 12.0 even though the index-based slope was exactly 1.0.
+        # Buckets land on 2024-01-01..2024-12-01 (date_trunc('month', ...)
+        # of the 15th of each month); real calendar months have unequal
+        # day-lengths (28-31 days), so uniform-index spacing and true
+        # elapsed-time spacing diverge slightly. Hand-computed via the
+        # exact same dates/values as the fixture: slope = 11.97931345753617.
+        assert body["stats"]["trend_per_year"] == pytest.approx(11.97931345753617, abs=1e-6)
+
+    async def test_trend_per_year_consistent_across_resolutions(self, client):
+        """The old index-based regression only meant "per year" at
+        resolution="monthly" (trend_per_year = slope * 12). Elapsed-time
+        regression must report a physically consistent per-year rate
+        regardless of which resolution bucketed the series — this is the
+        actual bug the elapsed-time fix closes, so it needs its own
+        explicit guard rather than relying on the monthly-only assertion
+        above."""
+        await _seed_timeseries_fixture()
+        r_monthly = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"parameter": _PARAM, "resolution": "monthly", "station": "ST-A"},
+        )
+        r_daily = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"parameter": _PARAM, "resolution": "daily", "station": "ST-A"},
+        )
+        assert r_monthly.status_code == 200, r_monthly.text
+        assert r_daily.status_code == 200, r_daily.text
+        monthly_trend = r_monthly.json()["stats"]["trend_per_year"]
+        daily_trend = r_daily.json()["stats"]["trend_per_year"]
+        # Same underlying data (one value per calendar day the station has
+        # a record, values 1..12 across Jan..Dec) fit against real elapsed
+        # time must yield approximately the same "value change per year"
+        # regardless of whether the series was bucketed daily or monthly —
+        # the old implementation would have reported a ~365x-too-large
+        # daily trend (slope-per-day * 12) instead.
+        assert daily_trend == pytest.approx(monthly_trend, rel=0.05)
 
     async def test_seasonal_breakdown_has_four_seasons(self, client):
         await _seed_timeseries_fixture()
@@ -133,6 +169,38 @@ class TestTimeSeries:
         labels = {s["label"] for s in body["seasonal"]}
         assert "Monsoon (Jun-Sep)" in labels
         assert "Winter (Dec-Feb)" in labels
+
+    async def test_resolution_seasonal_buckets_by_bangladesh_seasons(self, client):
+        """resolution="seasonal" must group by the app's own Bangladesh
+        4-season definition (Pre-Monsoon Mar-May, Monsoon Jun-Sep,
+        Post-Monsoon Oct-Nov, Winter Dec-Feb), not Postgres' ordinary
+        calendar quarter (Jan-Mar/Apr-Jun/Jul-Sep/Oct-Dec) — the previous
+        implementation used date_trunc('quarter', ...) directly, which
+        would have grouped March with Jan-Feb (calendar Q1) instead of
+        with Apr-May (Pre-Monsoon)."""
+        await _seed_timeseries_fixture()
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"parameter": _PARAM, "resolution": "seasonal", "station": "ST-A"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        series = {p["date"]: p["value"] for p in body["series"]}
+        # Fixture: value=month for Jan(1)..Dec(12) 2024, day=15.
+        # Jan+Feb 2024 roll into the PRIOR December's Winter bucket
+        # (2023-12-01, only 2 of its 3 months present in this fixture);
+        # Mar-May -> 2024-03-01; Jun-Sep -> 2024-06-01; Oct-Nov ->
+        # 2024-10-01; Dec alone starts a new (incomplete) Winter bucket
+        # at 2024-12-01.
+        assert series["2023-12-01"] == pytest.approx((1.0 + 2.0) / 2)  # Jan, Feb
+        assert series["2024-03-01"] == pytest.approx((3.0 + 4.0 + 5.0) / 3)  # Mar, Apr, May
+        assert series["2024-06-01"] == pytest.approx((6.0 + 7.0 + 8.0 + 9.0) / 4)  # Jun-Sep
+        assert series["2024-10-01"] == pytest.approx((10.0 + 11.0) / 2)  # Oct, Nov
+        assert series["2024-12-01"] == pytest.approx(12.0)  # Dec alone
+        # Calendar-quarter grouping (the old, wrong behavior) would have
+        # produced a 2024-01-01 bucket averaging Jan-Mar (1,2,3); no such
+        # bucket should exist under Bangladesh-season grouping.
+        assert "2024-01-01" not in series
 
     async def test_climatology_has_twelve_months(self, client):
         await _seed_timeseries_fixture()
@@ -268,6 +336,72 @@ class TestComparison:
         assert body["scatter"]["r"] == pytest.approx(1.0, abs=0.01)
         # y = 2x -> slope ~2
         assert body["scatter"]["regression"]["slope"] == pytest.approx(2.0, abs=0.01)
+        # Both parameters have exactly 12 points at the same 12 dates
+        # (Jan-Dec 2024, station A) -> full overlap, n == 12.
+        assert body["scatter"]["n"] == 12
+        assert body["scatter"]["pairing_method"] == "exact_date_match"
+
+    async def test_n_reflects_partial_date_overlap(self, client):
+        """n must reflect the true size of the date-intersection actually
+        used for r/regression/the scatter plot — not len(params.parameters)
+        or either series' own length in isolation. Seeds a second dataset
+        where one parameter has 12 monthly points and another has only 5
+        of those same dates, so n must be exactly 5, not 12."""
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Partial Overlap Test", description="test", color_tag="cat-partial")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-VIZ-PARTIAL",
+                title="Partial Overlap Test Dataset",
+                category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value,
+                record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+
+            full_param, partial_param = "Full Series Param", "Partial Series Param"
+            for month in range(1, 13):
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id,
+                        time=date(2024, month, 1),
+                        lat=21.0,
+                        lon=90.0,
+                        parameter=full_param,
+                        value=float(month),
+                        unit="unit",
+                        quality_flag="normal",
+                        geom="SRID=4326;POINT(90.0 21.0)",
+                    )
+                )
+            # Only 5 of the same 12 dates for the second parameter.
+            for month in (1, 2, 3, 4, 5):
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id,
+                        time=date(2024, month, 1),
+                        lat=21.0,
+                        lon=90.0,
+                        parameter=partial_param,
+                        value=float(month) * 10,
+                        unit="unit",
+                        quality_flag="normal",
+                        geom="SRID=4326;POINT(90.0 21.0)",
+                    )
+                )
+            await db.commit()
+
+        r = await client.post(
+            "/api/v1/visualize/comparison",
+            json={"parameters": [full_param, partial_param]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["scatter"]["n"] == 5
+        assert len(body["scatter"]["x"]) == 5
+        assert len(body["scatter"]["y"]) == 5
 
     async def test_correlation_matrix_symmetric_with_unit_diagonal(self, client):
         await _seed_timeseries_fixture()

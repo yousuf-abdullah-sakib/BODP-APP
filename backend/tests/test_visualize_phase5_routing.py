@@ -387,3 +387,150 @@ class TestMixedStorageKindVisualize:
         # Parquet contributes 1,2,3 (sum=6, n=3); the legacy row
         # contributes 10.0 (n=1) -> weighted mean = 16/4 = 4.0.
         assert june_point["value"] == pytest.approx(4.0)
+
+    async def test_statistics_matches_timeseries_for_mixed_storage(self, client, admin_headers):
+        """Regression guard for the Statistics/Temporal consistency bug:
+        get_statistics used to build its own series by appending raw
+        Parquet rows onto an already-averaged legacy SQL bucket and taking
+        an unweighted mean of the mixture -- treating a legacy bucket's
+        average as if it were a single observation regardless of how many
+        real rows it actually represents. That's only invisible when the
+        legacy bucket happens to be backed by exactly one row; with 3
+        legacy rows averaging to 9.0 on the same date a single Parquet
+        row (1.0) lands on, the old unweighted mean gave (9.0+1.0)/2=5.0,
+        while the correct count-weighted mean is (9.0*3+1.0*1)/(3+1)=7.0.
+        Both get_timeseries and get_statistics must now agree on 7.0."""
+        from datetime import date as date_cls
+
+        from app.models.catalog import DatasetRecord
+
+        dataset_id, file_metadata = await _upload_and_approve(
+            client, admin_headers,
+            filename="mixed_phase5_stats.csv", content=_make_tabular_csv_bytes(), content_type="text/csv",
+        )
+        assert file_metadata["storage_kind"] == "parquet"
+
+        # 3 legacy rows on the SAME calendar day as Parquet's station-A
+        # 2024-06-01 point (value 1.0) -- AVG(value)=9.0 server-side, but
+        # backed by 3 real rows, not 1.
+        async with AsyncSessionLocal() as db:
+            for legacy_value in (7.0, 9.0, 11.0):
+                db.add(
+                    DatasetRecord(
+                        dataset_id=uuid.UUID(dataset_id),
+                        time=date_cls(2024, 6, 1),
+                        lat=21.5,
+                        lon=90.5,
+                        parameter=_PARQUET_PARAM,
+                        value=legacy_value,
+                        unit="C",
+                        quality_flag="normal",
+                        geom="SRID=4326;POINT(90.5 21.5)",
+                    )
+                )
+            await db.commit()
+
+        ts_resp = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"dataset_id": dataset_id, "parameter": _PARQUET_PARAM, "resolution": "daily"},
+        )
+        assert ts_resp.status_code == 200, ts_resp.text
+        ts_body = ts_resp.json()
+        ts_june_1 = next(p["value"] for p in ts_body["series"] if p["date"] == "2024-06-01")
+        # Legacy AVG(value)=9.0 (n=3, sum=27); Parquet contributes 1.0
+        # (n=1) -> weighted mean = (27+1)/(3+1) = 28/4 = 7.0.
+        assert ts_june_1 == pytest.approx(7.0)
+
+        stats_resp = await client.post(
+            "/api/v1/visualize/statistics",
+            json={"dataset_id": dataset_id, "parameter": _PARQUET_PARAM},
+        )
+        assert stats_resp.status_code == 200, stats_resp.text
+        stats_body = stats_resp.json()
+        # Statistics' histogram/series must now use the SAME weighted
+        # merge as get_timeseries -- 7.0 must appear (the old unweighted
+        # implementation would have produced 5.0 here instead).
+        assert 7.0 in {round(v, 6) for v in stats_body["histogram"]}
+        assert 5.0 not in {round(v, 6) for v in stats_body["histogram"]}
+
+
+def _make_season_spanning_csv_bytes() -> bytes:
+    """Station A, one row per month for Feb-Jun 2024 (values = month
+    number) -- spans the Pre-Monsoon/Winter boundary (Feb belongs to the
+    PRIOR December's Winter bucket) and the Winter/Pre-Monsoon boundary
+    (Mar starts a new Pre-Monsoon bucket), so a resolution="seasonal"
+    query has multiple real bucket boundaries to get right, not just one
+    season in isolation."""
+    rows = []
+    for month, value in [(2, 2.0), (3, 3.0), (4, 4.0), (5, 5.0), (6, 6.0)]:
+        rows.append(
+            {"time": f"2024-{month:02d}-15", "lat": 21.0, "lon": 90.0, "station": "ST-A", "sea_surface_temp": value}
+        )
+    df = pd.DataFrame(rows)
+    buf = io.BytesIO()
+    df.to_csv(buf, index=False)
+    return buf.getvalue()
+
+
+class TestSeasonalResolutionAcrossStorageTiers:
+    """resolution="seasonal" must bucket by the app's own Bangladesh
+    4-season definition (Pre-Monsoon Mar-May, Monsoon Jun-Sep,
+    Post-Monsoon Oct-Nov, Winter Dec-Feb) on EVERY storage tier, not
+    Postgres'/DuckDB's/pandas' native calendar-quarter concept. Fixture:
+    Feb(2.0), Mar(3.0), Apr(4.0), May(5.0), Jun(6.0) 2024 -- expected
+    buckets: 2023-12-01 -> [2.0] (Feb alone, prior Winter), 2024-03-01 ->
+    [3.0, 4.0, 5.0] avg=4.0 (Mar-May, Pre-Monsoon), 2024-06-01 -> [6.0]
+    (Jun alone, Monsoon start). Calendar-quarter grouping would instead
+    put Feb-Mar together (Q1) and April onward in Q2 -- a materially
+    different, wrong split this test would catch."""
+
+    async def test_parquet_backed_seasonal_matches_bangladesh_seasons(self, client, admin_headers):
+        dataset_id, file_metadata = await _upload_and_approve(
+            client, admin_headers,
+            filename="seasonal_phase5.csv", content=_make_season_spanning_csv_bytes(), content_type="text/csv",
+        )
+        assert file_metadata["storage_kind"] == "parquet"
+
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"dataset_id": dataset_id, "parameter": _PARQUET_PARAM, "resolution": "seasonal"},
+        )
+        assert r.status_code == 200, r.text
+        series = {p["date"]: p["value"] for p in r.json()["series"]}
+        assert series["2023-12-01"] == pytest.approx(2.0)
+        assert series["2024-03-01"] == pytest.approx((3.0 + 4.0 + 5.0) / 3)
+        assert series["2024-06-01"] == pytest.approx(6.0)
+        # Calendar-quarter grouping (the old, wrong DuckDB fallback to
+        # "month" would ALSO have failed this, differently) would produce
+        # no bucket matching this exact 3-value Pre-Monsoon average.
+        assert "2024-02-01" not in series  # not a real Bangladesh-season boundary
+
+    async def test_zarr_backed_seasonal_matches_bangladesh_seasons(self, client, admin_headers, tmp_path):
+        p = tmp_path / "seasonal_phase5_grid.nc"
+        times = pd.to_datetime(["2024-02-15", "2024-03-15", "2024-04-15", "2024-05-15", "2024-06-15"])
+        lats = np.array([20.0, 21.0])
+        lons = np.array([90.0, 91.0])
+        data = np.zeros((5, 2, 2))
+        for i, v in enumerate([2.0, 3.0, 4.0, 5.0, 6.0]):
+            data[i, :, :] = v
+        ds = xr.Dataset(
+            {_ZARR_PARAM: (("time", "lat", "lon"), data)},
+            coords={"time": times, "lat": lats, "lon": lons},
+        )
+        ds.to_netcdf(p)
+
+        dataset_id, file_metadata = await _upload_and_approve(
+            client, admin_headers,
+            filename="seasonal_phase5_grid.nc", content=p.read_bytes(), content_type="application/x-netcdf",
+        )
+        assert file_metadata["storage_kind"] == "chunked_array"
+
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={"dataset_id": dataset_id, "parameter": _ZARR_PARAM, "resolution": "seasonal"},
+        )
+        assert r.status_code == 200, r.text
+        series = {p["date"]: p["value"] for p in r.json()["series"]}
+        assert series["2023-12-01"] == pytest.approx(2.0)
+        assert series["2024-03-01"] == pytest.approx((3.0 + 4.0 + 5.0) / 3)
+        assert series["2024-06-01"] == pytest.approx(6.0)

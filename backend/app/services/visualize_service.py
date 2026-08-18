@@ -66,6 +66,45 @@ _SEASONS: dict[str, list[int]] = {
     "Winter (Dec-Feb)": [12, 1, 2],
 }
 
+# Month -> (season start month, year offset) for resolution="seasonal"
+# time-series bucketing (distinct from _SEASONS above, which only powers
+# the single lifetime "Seasonal Pattern" summary and never groups by
+# year). A Winter season spanning Dec 2024 + Jan 2025 + Feb 2025 is
+# bucketed at its own START date, 2024-12-01 — so December uses offset 0
+# (bucket dated the same year) while January/February use offset -1
+# (bucket dated the PRIOR year, i.e. the December they belong with) — so
+# each season's 3 calendar months are always contiguous in real time and
+# land in the identical bucket. There is no pre-existing convention
+# elsewhere in this codebase to follow here since nothing previously
+# grouped seasons per-year; this establishes the one canonical definition
+# every storage-tier path must now share.
+_SEASON_START_MONTH: dict[int, tuple[int, int]] = {
+    1: (12, -1),  # Jan -> Winter bucket dated the PRIOR December
+    2: (12, -1),  # Feb -> Winter bucket dated the PRIOR December
+    3: (3, 0),
+    4: (3, 0),
+    5: (3, 0),
+    6: (6, 0),
+    7: (6, 0),
+    8: (6, 0),
+    9: (6, 0),
+    10: (10, 0),
+    11: (10, 0),
+    12: (12, 0),  # Dec -> Winter bucket dated THIS December
+}
+
+
+def season_bucket_date(d: date) -> date:
+    """Maps any date to its representative Bangladesh-season bucket date
+    (the 1st of the season's starting month) — the single canonical
+    (year, season) grouping every resolution="seasonal" code path
+    (legacy SQL, DuckDB/Parquet, Zarr/xarray) must use, so all three
+    storage tiers bucket the exact same date into the exact same bucket.
+    Mirrors _SEASONS' month groups exactly (Pre-Monsoon Mar-May, Monsoon
+    Jun-Sep, Post-Monsoon Oct-Nov, Winter Dec-Feb)."""
+    start_month, year_offset = _SEASON_START_MONTH[d.month]
+    return date(d.year + year_offset, start_month, 1)
+
 
 def _cache_key(module: str, params: VizFilterParams) -> str:
     payload = json.dumps(params.model_dump(mode="json"), sort_keys=True)
@@ -330,14 +369,22 @@ def _std_dev(xs: list[float]) -> float:
     return float(np.std(xs, ddof=1)) if len(xs) >= 2 else 0.0
 
 
-def _linreg(ys: list[float]) -> tuple[float, float]:
-    """Least-squares linear regression against index 0..n-1 — NOT true
-    elapsed-time regression, matching the frontend's linreg() exactly so
-    trend-per-year semantics are preserved identically."""
+def _linreg(dates: list[date], ys: list[float]) -> tuple[float, float]:
+    """Least-squares linear regression against real elapsed time, in
+    fractional years since dates[0] — NOT bucket index. Index-based
+    regression only produces a physically meaningful "per year" slope
+    when every bucket happens to be exactly one calendar month
+    (resolution="monthly"); at any other resolution, or whenever a
+    bucket is missing (gaps are dropped from the series entirely, not
+    padded), an index-based slope silently means something other than
+    "value change per year". Regressing against true elapsed time makes
+    the resulting slope unconditionally "value change per year"
+    regardless of resolution or gaps, so trend_per_year needs no
+    resolution-dependent multiplier at the call site."""
     n = len(ys)
     if n < 2:
         return 0.0, (ys[0] if ys else 0.0)
-    xs = list(range(n))
+    xs = [(d - dates[0]).days / 365.25 for d in dates]
     mx, my = _mean(xs), _mean(ys)
     num = sum((xs[i] - mx) * (ys[i] - my) for i in range(n))
     den = sum((xs[i] - mx) ** 2 for i in range(n))
@@ -360,10 +407,16 @@ def _pearson(xs: list[float], ys: list[float]) -> float:
 
 
 def _resolution_trunc(resolution: str):
+    """SQL date_trunc part name for every resolution EXCEPT "seasonal" —
+    Postgres has no native trunc unit for the app's Bangladesh 4-season
+    definition (its 'quarter' is an ordinary calendar quarter, Jan-Mar/
+    Apr-Jun/Jul-Sep/Oct-Dec, not Pre-Monsoon/Monsoon/Post-Monsoon/Winter).
+    Callers must special-case "seasonal" themselves, bucketing via
+    season_bucket_date() over day-level rows instead of using this
+    function's output for that case — see get_timeseries."""
     return {
         "daily": "day",
         "monthly": "month",
-        "seasonal": "quarter",
         "annual": "year",
     }[resolution]
 
@@ -385,29 +438,45 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
     if cached is not None:
         return TimeSeriesResponse.model_validate(cached)
 
-    trunc_unit = _resolution_trunc(params.resolution)
-    bucket = func.date_trunc(trunc_unit, DatasetRecord.time).label("bucket")
-    query = (
-        select(bucket, func.avg(DatasetRecord.value).label("avg_value"), func.count().label("n"))
-        .where(DatasetRecord.parameter == params.parameter)
-        .group_by(bucket)
-        .order_by(bucket)
-    )
-    query = _apply_viz_filters(query, params)
-
-    result = await db.execute(query)
-    rows = result.all()
-
     # PLAN.md Phase 5: sql_weighted starts from the legacy SQL buckets
     # (always queried, exactly as before), then PARQUET/CHUNKED_ARRAY
     # files belonging to the SAME dataset_id are merged in additively —
     # see _merged_timeseries' docstring for why this is a weighted mean,
     # not a plain concatenation.
     weighted: dict[date, list[float]] = defaultdict(lambda: [0.0, 0.0])
-    for row in rows:
-        bucket_date = row.bucket.date()
-        weighted[bucket_date][0] += float(row.avg_value) * row.n
-        weighted[bucket_date][1] += row.n
+
+    if params.resolution == "seasonal":
+        # No native SQL trunc unit for the Bangladesh 4-season definition
+        # (season_bucket_date's docstring) — group by real day-level rows
+        # in SQL, then re-bucket into (year, season) in Python.
+        bucket = DatasetRecord.time.label("bucket")
+        query = (
+            select(bucket, func.avg(DatasetRecord.value).label("avg_value"), func.count().label("n"))
+            .where(DatasetRecord.parameter == params.parameter)
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        query = _apply_viz_filters(query, params)
+        result = await db.execute(query)
+        for row in result.all():
+            season_date = season_bucket_date(row.bucket)
+            weighted[season_date][0] += float(row.avg_value) * row.n
+            weighted[season_date][1] += row.n
+    else:
+        trunc_unit = _resolution_trunc(params.resolution)
+        bucket = func.date_trunc(trunc_unit, DatasetRecord.time).label("bucket")
+        query = (
+            select(bucket, func.avg(DatasetRecord.value).label("avg_value"), func.count().label("n"))
+            .where(DatasetRecord.parameter == params.parameter)
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        query = _apply_viz_filters(query, params)
+        result = await db.execute(query)
+        for row in result.all():
+            bucket_date = row.bucket.date()
+            weighted[bucket_date][0] += float(row.avg_value) * row.n
+            weighted[bucket_date][1] += row.n
 
     if params.dataset_id:
         non_legacy_rows = await _merged_timeseries(
@@ -430,15 +499,21 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
         if n > 0
     ]
     values = [p.value for p in series]
+    series_dates = [p.date for p in series]
 
-    slope, intercept = _linreg(values)
+    slope, intercept = _linreg(series_dates, values)
     stats = TimeSeriesStats(
         mean=_mean(values),
         median=_median(values),
         std=_std_dev(values),
         min=min(values) if values else 0.0,
         max=max(values) if values else 0.0,
-        trend_per_year=slope * 12,
+        # slope is already "value change per year" (regression is against
+        # real elapsed time in fractional years, not bucket index) — no
+        # resolution-dependent multiplier needed, unlike the old
+        # index-based regression which only meant "per year" at
+        # resolution="monthly".
+        trend_per_year=slope,
         count=len(values),
     )
 
@@ -446,7 +521,9 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
     moving_average = [
         _mean(values[max(0, i - window + 1) : i + 1]) for i in range(len(values))
     ]
-    trend_line = [intercept + slope * i for i in range(len(values))]
+    trend_line = [
+        intercept + slope * ((d - series_dates[0]).days / 365.25) for d in series_dates
+    ]
 
     seasonal = [
         SeasonalPoint(label=label, value=_mean([p.value for p in series if p.date.month in months]))
@@ -711,6 +788,14 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
         y=y_vals,
         r=r,
         regression=RegressionSchema(slope=slope, intercept=intercept),
+        # Paired-sample transparency (Visualize Phase A) — x_vals/y_vals
+        # are joined by exact calendar-date match (common_dates above); no
+        # tolerance window. A single date matching between two different-
+        # resolution parameters could paired-correlate a small fraction of
+        # either series' real observations, so the count backing r is
+        # surfaced explicitly rather than left for the caller to infer.
+        n=len(common_dates),
+        pairing_method="exact_date_match",
     )
 
     n = len(params.parameters)
@@ -784,7 +869,6 @@ async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> Statist
     for row in box_result.all():
         by_station[row.name].append(float(row.value))
 
-    raw_by_date: dict[date, list[float]] = defaultdict(list)
     if non_legacy_grouped:
         from app.services import gridded_query_service, tabular_query_service
 
@@ -792,37 +876,55 @@ async def get_statistics(db: AsyncSession, params: StatisticsRequest) -> Statist
             raw = await bounded_to_thread(
                 tabular_query_service.get_raw_values, file, params.parameter, record_filter
             )
-            for station, t, value in raw:
+            for station, _t, value in raw:
                 by_station[station or f"file:{file.id}"].append(value)
-                if t is not None:
-                    raw_by_date[t].append(value)
         for file in non_legacy_grouped.get(StorageKind.CHUNKED_ARRAY.value, []):
             raw = await bounded_to_thread(
                 gridded_query_service.get_raw_values, file, params.parameter, record_filter
             )
-            for station, t, value in raw:
+            for station, _t, value in raw:
                 by_station[station or f"file:{file.id}"].append(value)
-                if t is not None:
-                    raw_by_date[t].append(value)
 
     station_names = sorted(by_station)[:6]
     box_plot = [BoxPlotSeries(station=name, values=by_station[name]) for name in station_names]
 
+    # Series construction (feeds histogram/annual_anomalies/decomposition/
+    # calendar_heatmap below) reuses the exact same count-weighted merge
+    # _merged_timeseries provides for get_timeseries, rather than a
+    # separate ad hoc aggregation — folding raw Parquet/Zarr rows onto the
+    # same list as an already-averaged legacy SQL bucket (the previous
+    # approach here) treats one pre-averaged value as equally weighted
+    # against however many raw rows happen to exist for that date, which
+    # is exactly the bug pattern _merged_timeseries' docstring warns
+    # against. Both modules must agree on one canonical aggregation so the
+    # same dataset/filters can't report different numbers depending which
+    # endpoint is queried. resolution="daily" preserves this endpoint's
+    # existing per-calendar-day granularity (it never bucketed coarser
+    # than a single DatasetRecord.time value).
     series_query = (
-        select(DatasetRecord.time, func.avg(DatasetRecord.value).label("avg_value"))
+        select(DatasetRecord.time, func.avg(DatasetRecord.value).label("avg_value"), func.count().label("n"))
         .where(DatasetRecord.parameter == params.parameter)
         .group_by(DatasetRecord.time)
         .order_by(DatasetRecord.time)
     )
     series_query = _apply_viz_filters(series_query, params)
     series_result = await db.execute(series_query)
-    series_by_date: dict[date, list[float]] = defaultdict(list)
+    weighted: dict[date, list[float]] = defaultdict(lambda: [0.0, 0.0])
     for row in series_result.all():
-        series_by_date[row.time].append(float(row.avg_value))
-    for t, vals in raw_by_date.items():
-        series_by_date[t].extend(vals)
+        weighted[row.time][0] += float(row.avg_value) * row.n
+        weighted[row.time][1] += row.n
 
-    series = [(d, _mean(vals)) for d, vals in sorted(series_by_date.items())]
+    if params.dataset_id:
+        non_legacy_rows = await _merged_timeseries(
+            db, params.dataset_id, params.parameter, params, resolution="daily"
+        )
+        for bucket_date, avg, n in non_legacy_rows:
+            weighted[bucket_date][0] += avg * n
+            weighted[bucket_date][1] += n
+
+    series = [
+        (bucket_date, total / n) for bucket_date, (total, n) in sorted(weighted.items()) if n > 0
+    ]
     values = [v for _, v in series]
 
     histogram = values

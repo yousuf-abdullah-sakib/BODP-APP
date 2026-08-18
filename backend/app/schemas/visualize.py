@@ -144,6 +144,14 @@ class ScatterSchema(BaseModel):
     y: list[float]
     r: float
     regression: RegressionSchema
+    # Transparency fields (Visualize Phase A) — the paired sample size
+    # backing r/regression/the scatter plot, and how the two parameters'
+    # observations were paired. Additive only: does not change x/y/r/
+    # regression, which are computed exactly as before. n == len(x) ==
+    # len(y) always; exposed explicitly so the frontend/user doesn't have
+    # to infer sample size by counting array length themselves.
+    n: int
+    pairing_method: str
 
 
 class CorrelationMatrixSchema(BaseModel):

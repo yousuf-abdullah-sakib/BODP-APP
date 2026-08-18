@@ -17,6 +17,14 @@ interface ComparisonModuleProps {
   availableParameters: string[];
 }
 
+// Human-readable labels for ScatterResult.pairing_method — a stable,
+// machine-readable value from the backend (e.g. "exact_date_match")
+// mapped to display text here, same pattern as SpatialMappingModule's
+// BASE_MAPS/interpolation-method labels.
+const PAIRING_METHOD_LABELS: Record<string, string> = {
+  exact_date_match: "Exact date match",
+};
+
 export default function ComparisonModule({ filters, availableParameters }: ComparisonModuleProps) {
   const vars = availableParameters.length >= 2 ? availableParameters : [filters.parameter];
   const [xVar, setXVar] = useState(vars[0] ?? filters.parameter);
@@ -78,6 +86,8 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
   }
 
   const r = scatterData2?.scatter.r ?? 0;
+  const pairedN = scatterData2?.scatter.n ?? 0;
+  const pairingMethodLabel = PAIRING_METHOD_LABELS[scatterData2?.scatter.pairing_method ?? ""] ?? scatterData2?.scatter.pairing_method ?? "";
   const xVals = scatterData2?.scatter.x ?? [];
   const yVals = scatterData2?.scatter.y ?? [];
 
@@ -198,6 +208,14 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
             Pearson r = <b style={{ color: "var(--accent)" }}>{loading ? "…" : r.toFixed(3)}</b>
           </span>
         </div>
+        {!loading && (
+          <div
+            className="gis-caption"
+            style={{ padding: "0.35rem 1.2rem 0", marginTop: 0, marginBottom: 0, color: "var(--text-muted)" }}
+          >
+            N = {pairedN} paired observation{pairedN === 1 ? "" : "s"} &middot; Pairing: {pairingMethodLabel}
+          </div>
+        )}
         <div className="chart-body">{scatterChart(360)}</div>
       </div>
       {scatterFullscreen.expanded && (
