@@ -618,14 +618,37 @@ async def get_spatial_points(db: AsyncSession, params: SpatialRequest) -> list[S
     return points
 
 
+def _haversine_km(
+    lat1: np.ndarray | float, lon1: np.ndarray | float, lat2: np.ndarray | float, lon2: np.ndarray | float
+) -> np.ndarray:
+    """Great-circle distance in km — either side may be a scalar or a
+    numpy array (broadcasts normally). Used by _idw so IDW weighting
+    reflects true geodesic closeness rather than raw lat/lon degree
+    differences, which are NOT physically comparable to each other (at
+    Bangladesh's ~20-23N latitude, 1 degree of longitude is only
+    ~103-104 km while 1 degree of latitude is ~110-111 km — a real ~6%
+    directional bias if degrees are treated as a flat Euclidean plane)."""
+    lat1_r, lon1_r, lat2_r, lon2_r = np.radians(lat1), np.radians(lon1), np.radians(lat2), np.radians(lon2)
+    dlat = lat2_r - lat1_r
+    dlon = lon2_r - lon1_r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat1_r) * np.cos(lat2_r) * np.sin(dlon / 2.0) ** 2
+    c = 2.0 * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+    return _EARTH_RADIUS_KM * c
+
+
 def _idw(points: list[SpatialPointSchema], lats: np.ndarray, lons: np.ndarray, power: int = 2) -> np.ndarray:
     """Vectorized inverse-distance-weighting onto a regular grid — same
-    algorithm as bodp-frontend/src/lib/mock-data/stats.ts's idwGrid()."""
+    weighting formula as bodp-frontend/src/lib/mock-data/stats.ts's
+    idwGrid(), but distance is real geodesic distance (_haversine_km),
+    not raw lat/lon degree differences — the weights (w = 1/d**power)
+    are only ever used as a ratio (z = sum(w*v)/sum(w)), so the change
+    from degrees to km has no effect on its own; only the *relative*
+    accuracy of which points count as "closer" improves."""
     lon_grid, lat_grid = np.meshgrid(lons, lats)
     z = np.zeros_like(lat_grid, dtype=float)
     w_sum = np.zeros_like(lat_grid, dtype=float)
     for p in points:
-        d = np.hypot(lat_grid - p.lat, lon_grid - p.lon)
+        d = _haversine_km(lat_grid, lon_grid, p.lat, p.lon)
         d = np.where(d == 0, 1e-6, d)
         w = 1.0 / (d**power)
         z += w * p.value
@@ -651,9 +674,6 @@ def compute_interpolation(
         z = _nearest(points, lats, lons)
         method_used = "nearest"
     else:
-        # "kriging" silently falls back to IDW, matching the prototype's
-        # own behavior exactly (Master Plan §3 Phase 7 kickoff decision —
-        # no pykrige dependency added).
         z = _idw(points, lats, lons)
         method_used = "idw"
 

@@ -265,6 +265,83 @@ class TestSpatial:
         # used by stationLatestValue-equivalent logic).
         assert grid["z"][0][0] == pytest.approx(12.0, abs=2.0)
 
+    async def test_idw_uses_geodesic_not_planar_distance(self, client, admin_headers):
+        """Proves IDW weighting is by real geodesic (haversine) distance,
+        not raw lat/lon degree differences. Query point (21.75, 90.0);
+        point A is 1 DEGREE due north (pure latitude offset, value=10);
+        point B is 1 DEGREE due east (pure longitude offset, value=20).
+        Under the OLD planar-degree distance, d_A == d_B == 1.0 exactly
+        (equal raw degree offsets) -> equal IDW weight -> interpolated
+        value at the query point = midpoint average = 15.0. Under real
+        geodesic distance, B (longitude offset) is physically CLOSER than
+        A (latitude offset) at this latitude — 1 degree of longitude
+        shrinks by cos(21.75deg) relative to 1 degree of latitude — so B
+        must receive strictly more weight, pulling the interpolated value
+        measurably above 15.0 toward B's value (20). Hand-computed exact
+        expected value (haversine, power=2): 15.368596628435457."""
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Geodesic IDW Test", description="test", color_tag="cat-geo")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-VIZ-GEO",
+                title="Geodesic IDW Test Dataset",
+                category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value,
+                record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+
+            station_north = Station(name="North Station", code="ST-N", lat=22.75, lon=90.0, depth_m=10)
+            station_east = Station(name="East Station", code="ST-E", lat=21.75, lon=91.0, depth_m=10)
+            db.add_all([station_north, station_east])
+            await db.flush()
+
+            param = "Geodesic Test Param"
+            db.add(
+                DatasetRecord(
+                    dataset_id=dataset.id, time=date(2024, 1, 1), lat=22.75, lon=90.0,
+                    station_id=station_north.id, parameter=param, value=10.0, unit="unit",
+                    quality_flag="normal", geom="SRID=4326;POINT(90.0 22.75)",
+                )
+            )
+            db.add(
+                DatasetRecord(
+                    dataset_id=dataset.id, time=date(2024, 1, 1), lat=21.75, lon=91.0,
+                    station_id=station_east.id, parameter=param, value=20.0, unit="unit",
+                    quality_flag="normal", geom="SRID=4326;POINT(91.0 21.75)",
+                )
+            )
+            await db.commit()
+
+        await client.patch(
+            "/api/v1/admin/settings/visualization-limits",
+            json={"viz_max_aoi_km2": 1_000_000},
+            headers=admin_headers,
+        )
+
+        # np.linspace's first point is always exactly lat_min/lon_min
+        # regardless of resolution, so grid["z"][0][0] is exactly the
+        # query point (21.75, 90.0) at any valid grid_resolution.
+        r = await client.post(
+            "/api/v1/visualize/spatial",
+            json={
+                "parameter": param,
+                "method": "idw",
+                "grid_resolution": 5,
+                "bounds": {"lat_min": 21.75, "lat_max": 22.75, "lon_min": 90.0, "lon_max": 91.0},
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "complete"
+        query_point_value = body["grid"]["z"][0][0]
+        # Old planar-degree behavior would give exactly 15.0 here; real
+        # geodesic distance must give a strictly, measurably larger value.
+        assert query_point_value > 15.1
+        assert query_point_value == pytest.approx(15.368596628435457, abs=1e-6)
+
     async def test_nearest_neighbour_returns_real_computation(self, client):
         await _seed_timeseries_fixture()
         r = await client.post(
@@ -279,7 +356,11 @@ class TestSpatial:
         assert r.status_code == 200, r.text
         assert r.json()["method_used"] == "nearest"
 
-    async def test_kriging_falls_back_to_idw(self, client):
+    async def test_kriging_method_rejected(self, client):
+        """Kriging was removed from the dropdown (Visualize Phase B) since
+        it never computed real kriging, only silently fell back to IDW —
+        the API must now reject it outright rather than perpetuate an
+        undisclosed silent fallback for direct callers."""
         await _seed_timeseries_fixture()
         r = await client.post(
             "/api/v1/visualize/spatial",
@@ -290,8 +371,7 @@ class TestSpatial:
                 "bounds": {"lat_min": 20.5, "lat_max": 23.5, "lon_min": 89.5, "lon_max": 92.5},
             },
         )
-        assert r.status_code == 200
-        assert r.json()["method_used"] == "idw"
+        assert r.status_code == 422
 
     async def test_large_request_dispatches_job(self, client):
         await _seed_timeseries_fixture()

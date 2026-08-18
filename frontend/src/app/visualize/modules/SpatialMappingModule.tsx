@@ -17,7 +17,6 @@ import { getDefaultBoundary } from "@/lib/api/boundary";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
 import type { InterpolationMethod, SpatialGrid, SpatialPoint } from "@/lib/types/visualize";
-import type { StationOption } from "@/lib/types/catalog";
 import type { Data } from "plotly.js";
 
 const GisSpatialMap = dynamic(() => import("@/components/map/GisSpatialMap"), {
@@ -59,12 +58,11 @@ function ToolGroup({ title, icon, defaultOpen = true, children }: { title: strin
 
 interface UseSpatialMappingArgs {
   parameter: string;
-  filteredStations: StationOption[];
   aoi: SpatialAOI | null;
   filters: VizFilters;
 }
 
-export function useSpatialMapping({ parameter, filteredStations, aoi, filters }: UseSpatialMappingArgs) {
+export function useSpatialMapping({ parameter, aoi, filters }: UseSpatialMappingArgs) {
   const { toast } = useToast();
   const exportsEnabled = useVizExportSettings();
   const [defaultBoundary, setDefaultBoundary] = useState<GeoJSON.FeatureCollection | null>(null);
@@ -194,12 +192,17 @@ export function useSpatialMapping({ parameter, filteredStations, aoi, filters }:
     };
   }, [parameter, method, resolution, bounds, filters]);
 
-  const allowedCodes = useMemo(() => new Set(filteredStations.map((s) => s.code)), [filteredStations]);
+  // points already reflects every applicable filter (bbox, depth,
+  // single-station-select, date, dataset, parameter) applied server-side
+  // — no further client-side filtering is needed or correct here. This
+  // used to compare each point's station label (a Station.name for
+  // legacy data, or a raw/synthesized label for Parquet/Zarr data) against
+  // a Set of Station.code values, which virtually never matched and
+  // silently hid almost every marker whenever any bbox/depth filter was
+  // active.
   const gisPoints = useMemo(() => {
-    return points
-      .filter((p) => filteredStations.length === 0 || allowedCodes.has(p.station))
-      .map((p) => ({ station: p.station, lat: p.lat, lon: p.lon, value: p.value, sizeValue: p.value }));
-  }, [points, allowedCodes, filteredStations.length]);
+    return points.map((p) => ({ station: p.station, lat: p.lat, lon: p.lon, value: p.value, sizeValue: p.value }));
+  }, [points]);
 
   const values = gisPoints.map((p) => p.value);
   const min = values.length ? Math.min(...values) : 0;
@@ -383,14 +386,11 @@ export function useSpatialMapping({ parameter, filteredStations, aoi, filters }:
           <label className="ctrl-label">Method</label>
           <select className="ctrl-select" value={method} onChange={(e) => setMethod(e.target.value as InterpolationMethod)}>
             <option value="idw">IDW</option>
-            <option value="kriging">Kriging</option>
             <option value="nearest">Nearest Neighbour</option>
           </select>
-          {method !== "idw" && (
+          {method === "nearest" && (
             <div className="gis-caption" style={{ marginTop: "0.3rem", marginBottom: 0 }}>
-              {method === "kriging"
-                ? "Computed as IDW — kriging not available in this build."
-                : "Real nearest-neighbour interpolation."}
+              Real nearest-neighbour interpolation.
             </div>
           )}
         </div>

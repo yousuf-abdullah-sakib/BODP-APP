@@ -122,7 +122,7 @@ export default function VisualizeClient() {
     update("lonMax", "");
   }
 
-  const spatial = useSpatialMapping({ parameter: filters.parameter, filteredStations, aoi, filters });
+  const spatial = useSpatialMapping({ parameter: filters.parameter, aoi, filters });
 
   return (
     <>

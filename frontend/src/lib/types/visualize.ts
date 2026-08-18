@@ -78,7 +78,7 @@ export interface SpatialGrid {
   z: number[][];
 }
 
-export type InterpolationMethod = "idw" | "kriging" | "nearest";
+export type InterpolationMethod = "idw" | "nearest";
 
 export interface SpatialBounds {
   lat_min: number;

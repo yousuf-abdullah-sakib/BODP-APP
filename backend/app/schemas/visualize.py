@@ -102,7 +102,7 @@ class SpatialGrid(BaseModel):
 
 class SpatialRequest(VizFilterParams):
     parameter: str = Field(min_length=1)
-    method: Literal["idw", "kriging", "nearest"] = "idw"
+    method: Literal["idw", "nearest"] = "idw"
     # Grid resolution (cell count per axis) — deliberately NOT named
     # `resolution` to avoid colliding with VizFilterParams.resolution
     # (temporal aggregation granularity), an unrelated concept.
