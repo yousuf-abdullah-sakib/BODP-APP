@@ -1,3 +1,11 @@
+/* MAP FILTER */
+.map-filter-box{background:rgba(15,118,110,0.04);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:0.8rem}
+.map-filter-head{padding:0.6rem 0.8rem;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)}
+.map-filter-head span{font-size:0.78rem;color:var(--text-secondary);font-weight:500}
+#spatialMap{height:200px;width:100%}
+.map-filter-info{padding:0.5rem 0.8rem;font-size:0.72rem;color:var(--text-muted);background:rgba(0,0,0,0.08)}
+.map-filter-info b{color:var(--accent)}
+
 .viz-hero{padding:4rem 2rem 2.5rem;background:var(--bg-secondary);border-bottom:1px solid var(--border);position:relative;overflow:hidden}
 .viz-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse 60% 80% at 80% 50%,rgba(15,118,110,0.07) 0%,transparent 70%);pointer-events:none}
 .viz-hero-inner{max-width:1300px;margin:0 auto;display:flex;align-items:flex-end;justify-content:space-between;gap:2rem;flex-wrap:wrap;position:relative}
