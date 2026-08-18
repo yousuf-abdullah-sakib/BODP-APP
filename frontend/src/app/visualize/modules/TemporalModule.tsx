@@ -28,6 +28,23 @@ const ANOMALY_NEG_COLOR = "#0891b2";
 const SEASONAL_COLOR = "#ea580c";
 const CLIMATOLOGY_COLOR = "#0891b2";
 
+// moving_average/rate_of_change are always 3-BUCKET windows, and a
+// bucket's real-world span depends on the selected resolution — these
+// labels must track that instead of assuming "3mo" or "month-over-month"
+// regardless of what's actually selected.
+const MOVING_AVG_WINDOW_LABEL: Record<VizFilters["resolution"], string> = {
+  daily: "3d",
+  monthly: "3mo",
+  seasonal: "3 seasons",
+  annual: "3yr",
+};
+const RATE_OF_CHANGE_SUBTITLE: Record<VizFilters["resolution"], string> = {
+  daily: "Day-over-day delta",
+  monthly: "Month-over-month delta",
+  seasonal: "Season-over-season delta",
+  annual: "Year-over-year delta",
+};
+
 export default function TemporalModule({
   filters,
   showTrend,
@@ -110,7 +127,14 @@ export default function TemporalModule({
 
     if (chartType !== "histogram" && chartType !== "box") {
       if (showMA) {
-        traces.push({ x: labels, y: moving_average, type: "scatter", mode: "lines", name: "Moving Avg (3mo)", line: { dash: "dot", width: 1.5 } } as Data);
+        traces.push({
+          x: labels,
+          y: moving_average,
+          type: "scatter",
+          mode: "lines",
+          name: `Moving Avg (${MOVING_AVG_WINDOW_LABEL[filters.resolution]})`,
+          line: { dash: "dot", width: 1.5 },
+        } as Data);
       }
       if (showTrend) {
         traces.push({ x: labels, y: trend_line, type: "scatter", mode: "lines", name: "Trend", line: { dash: "dash", width: 1.5 } } as Data);
@@ -287,7 +311,7 @@ export default function TemporalModule({
           <div className="chart-head">
             <div>
               <div className="chart-title">Rate of Change</div>
-              <div className="chart-subtitle">Month-over-month delta</div>
+              <div className="chart-subtitle">{RATE_OF_CHANGE_SUBTITLE[filters.resolution]}</div>
             </div>
             <ChartToolbar onExpand={rocFullscreen.expand} controls={rocControls} options={{ grid: true, resetView: true }} />
           </div>
@@ -299,7 +323,12 @@ export default function TemporalModule({
           <div className="chart-head">
             <div>
               <div className="chart-title">Anomaly from Mean</div>
-              <div className="chart-subtitle">Deviation from period average</div>
+              <div
+                className="chart-subtitle"
+                title="Baseline is the mean of whatever date range is currently filtered, not a fixed climatological normal (e.g. a WMO/NOAA reference period) — the same underlying data can show different anomaly values if the date filter changes."
+              >
+                Deviation from period average
+              </div>
             </div>
             <ChartToolbar onExpand={anomalyFullscreen.expand} controls={anomalyControls} options={{ grid: true, resetView: true }} />
           </div>

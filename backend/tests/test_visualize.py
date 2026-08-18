@@ -208,6 +208,26 @@ class TestTimeSeries:
         body = r.json()
         assert len(body["climatology"]) == 12
 
+    async def test_climatology_empty_month_is_null_not_zero(self, client):
+        """A month with zero observations must be reported as null, not
+        the misleading 0.0 a real reading could also produce."""
+        await _seed_timeseries_fixture()
+        # Narrow to Jan-Mar 2024 only -> Apr-Dec have zero observations.
+        r = await client.post(
+            "/api/v1/visualize/timeseries",
+            json={
+                "parameter": _PARAM, "station": "ST-A",
+                "date_from": "2024-01-01", "date_to": "2024-03-31",
+            },
+        )
+        assert r.status_code == 200, r.text
+        by_month = {p["month"]: p["value"] for p in r.json()["climatology"]}
+        assert by_month["Jan"] == pytest.approx(1.0)
+        assert by_month["Feb"] == pytest.approx(2.0)
+        assert by_month["Mar"] == pytest.approx(3.0)
+        for empty_month in ("Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"):
+            assert by_month[empty_month] is None
+
     async def test_anomaly_from_mean(self, client):
         await _seed_timeseries_fixture()
         r = await client.post(
@@ -420,6 +440,10 @@ class TestComparison:
         # (Jan-Dec 2024, station A) -> full overlap, n == 12.
         assert body["scatter"]["n"] == 12
         assert body["scatter"]["pairing_method"] == "exact_date_match"
+        # r_squared must be exactly r**2 of THIS response's own r, not a
+        # separately-recomputed or hardcoded value.
+        r_value = body["scatter"]["r"]
+        assert body["scatter"]["regression"]["r_squared"] == pytest.approx(r_value**2)
 
     async def test_n_reflects_partial_date_overlap(self, client):
         """n must reflect the true size of the date-intersection actually
@@ -489,10 +513,29 @@ class TestComparison:
             "/api/v1/visualize/comparison",
             json={"parameters": [_PARAM, "Salinity"]},
         )
-        matrix = r.json()["correlation_matrix"]["matrix"]
+        body = r.json()
+        matrix = body["correlation_matrix"]["matrix"]
         assert matrix[0][0] == pytest.approx(1.0)
         assert matrix[1][1] == pytest.approx(1.0)
         assert matrix[0][1] == pytest.approx(matrix[1][0])
+
+        n_matrix = body["correlation_matrix"]["n"]
+        # Same shape as matrix.
+        assert len(n_matrix) == len(matrix)
+        assert all(len(row) == len(matrix) for row in n_matrix)
+        # Symmetric (date-intersection is symmetric by construction).
+        assert n_matrix[0][1] == n_matrix[1][0]
+        # _PARAM's own series has 13 distinct dates (12 from station A's
+        # Jan-Dec monthly series + 1 more from stations B/C sharing
+        # 2023-12-01, grouped into a single bucket by that date) --
+        # Salinity only has the 12 station-A dates. The off-diagonal
+        # (paired) count is the intersection of the two, which is exactly
+        # 12 since none of Salinity's dates match B/C's 2023-12-01 —
+        # matching test_pearson_r_near_one_for_correlated_series' own
+        # n==12 assertion for this identical parameter pair.
+        assert n_matrix[0][0] == 13
+        assert n_matrix[1][1] == 12
+        assert n_matrix[0][1] == 12
 
     async def test_requires_at_least_two_parameters(self, client):
         r = await client.post("/api/v1/visualize/comparison", json={"parameters": [_PARAM]})

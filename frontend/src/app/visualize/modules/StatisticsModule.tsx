@@ -120,7 +120,7 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
         </div>
         <div className="chart-container">
           <div className="chart-head">
-            <div className="chart-title">Histogram</div>
+            <div className="chart-title">Histogram of Daily Means</div>
             <ChartToolbar onExpand={histFullscreen.expand} controls={histControls} options={{ grid: true, resetView: true }} />
           </div>
           <div className="chart-body">
@@ -143,7 +143,7 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
         </FullscreenOverlay>
       )}
       {histFullscreen.expanded && (
-        <FullscreenOverlay title="Histogram" onClose={histFullscreen.collapse}>
+        <FullscreenOverlay title="Histogram of Daily Means" onClose={histFullscreen.collapse}>
           <PlotlyChart data={histData} layout={histControls.layoutOverrides} height={640} downloadFilename={dl("histogram")} />
         </FullscreenOverlay>
       )}

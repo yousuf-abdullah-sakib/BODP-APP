@@ -534,7 +534,10 @@ async def get_timeseries(db: AsyncSession, params: TimeSeriesRequest) -> TimeSer
     for p in series:
         by_month[p.date.month].append(p.value)
     climatology = [
-        ClimatologyPoint(month=month_abbr[m], value=_mean(by_month.get(m, [])))
+        ClimatologyPoint(
+            month=month_abbr[m],
+            value=_mean(by_month[m]) if by_month.get(m) else None,
+        )
         for m in range(1, 13)
     ]
 
@@ -807,7 +810,7 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
         x=x_vals,
         y=y_vals,
         r=r,
-        regression=RegressionSchema(slope=slope, intercept=intercept),
+        regression=RegressionSchema(slope=slope, intercept=intercept, r_squared=r**2),
         # Paired-sample transparency (Visualize Phase A) — x_vals/y_vals
         # are joined by exact calendar-date match (common_dates above); no
         # tolerance window. A single date matching between two different-
@@ -820,7 +823,9 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
 
     n = len(params.parameters)
     matrix = [[0.0] * n for _ in range(n)]
+    n_matrix = [[0] * n for _ in range(n)]
     for i in range(n):
+        n_matrix[i][i] = len(series_by_parameter[params.parameters[i]])
         for j in range(n):
             if i == j:
                 matrix[i][j] = 1.0
@@ -830,11 +835,12 @@ async def get_comparison(db: AsyncSession, params: ComparisonRequest) -> Compari
             by_j = {p.date: p.value for p in series_by_parameter[pj]}
             common = sorted(set(by_i) & set(by_j))
             matrix[i][j] = _pearson([by_i[d] for d in common], [by_j[d] for d in common])
+            n_matrix[i][j] = len(common)
 
     response = ComparisonResponse(
         scatter=scatter,
         series_by_parameter=series_by_parameter,
-        correlation_matrix=CorrelationMatrixSchema(parameters=params.parameters, matrix=matrix),
+        correlation_matrix=CorrelationMatrixSchema(parameters=params.parameters, matrix=matrix, n=n_matrix),
     )
     await cache_set_json(cache_key, response.model_dump(mode="json"), ttl_seconds=_CACHE_TTL_SECONDS)
     return response

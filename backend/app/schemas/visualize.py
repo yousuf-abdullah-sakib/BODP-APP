@@ -56,7 +56,10 @@ class SeasonalPoint(BaseModel):
 
 class ClimatologyPoint(BaseModel):
     month: str
-    value: float
+    # None (not 0.0) when this month has zero observations in the
+    # filtered series — a genuinely-empty month must be distinguishable
+    # from a real 0.0 reading.
+    value: float | None
 
 
 class RateOfChangePoint(BaseModel):
@@ -135,6 +138,10 @@ class SpatialJobStatusResponse(BaseModel):
 class RegressionSchema(BaseModel):
     slope: float
     intercept: float
+    # Coefficient of determination (r**2) — trivial to compute since r
+    # is already available at the call site, but not worth making the
+    # caller re-derive it themselves.
+    r_squared: float
 
 
 class ScatterSchema(BaseModel):
@@ -157,6 +164,14 @@ class ScatterSchema(BaseModel):
 class CorrelationMatrixSchema(BaseModel):
     parameters: list[str]
     matrix: list[list[float]]
+    # Paired sample size backing each cell's r — same shape as matrix.
+    # Each cell is its own independent pairwise date-intersection
+    # (pairwise-complete, not listwise-complete), so this genuinely
+    # varies per cell, not one matrix-wide count. Diagonal is each
+    # parameter's own series length (not a "paired" count, since a
+    # parameter isn't paired with itself, but the closest meaningful
+    # analog: how many points that series has).
+    n: list[list[int]]
 
 
 class ComparisonRequest(VizFilterParams):

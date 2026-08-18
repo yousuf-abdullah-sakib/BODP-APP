@@ -86,6 +86,7 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
   }
 
   const r = scatterData2?.scatter.r ?? 0;
+  const rSquared = scatterData2?.scatter.regression.r_squared ?? 0;
   const pairedN = scatterData2?.scatter.n ?? 0;
   const pairingMethodLabel = PAIRING_METHOD_LABELS[scatterData2?.scatter.pairing_method ?? ""] ?? scatterData2?.scatter.pairing_method ?? "";
   const xVals = scatterData2?.scatter.x ?? [];
@@ -117,6 +118,7 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
   ];
 
   const corrMatrix = corrData?.correlation_matrix.matrix ?? [];
+  const corrNMatrix = corrData?.correlation_matrix.n ?? [];
   const corrParameters = corrData?.correlation_matrix.parameters ?? corrVars;
 
   const scatterFilename = exportsEnabled.comparison ? `${xVar}-vs-${yVar}-scatter` : undefined;
@@ -161,6 +163,8 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
           zmax: 1,
           text: corrMatrix.map((row) => row.map((v) => v.toFixed(2))) as unknown as string[],
           texttemplate: "%{text}",
+          customdata: corrNMatrix as unknown as string[],
+          hovertemplate: "%{x} × %{y}<br>r = %{z:.3f}<br>n = %{customdata} paired obs. (pairwise-complete)<extra></extra>",
           colorbar: { title: { text: "Pearson r" } },
         } as Data,
       ]}
@@ -206,6 +210,7 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
           </select>
           <span className="gis-label" style={{ marginLeft: "auto" }}>
             Pearson r = <b style={{ color: "var(--accent)" }}>{loading ? "…" : r.toFixed(3)}</b>
+            {!loading && <> (R&sup2; = {rSquared.toFixed(3)})</>}
           </span>
         </div>
         {!loading && (

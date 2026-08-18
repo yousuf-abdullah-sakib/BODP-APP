@@ -37,7 +37,8 @@ export interface SeasonalPoint {
 
 export interface ClimatologyPoint {
   month: string;
-  value: number;
+  /** null when this month has zero observations in the filtered series. */
+  value: number | null;
 }
 
 export interface RateOfChangePoint {
@@ -116,6 +117,7 @@ export interface SpatialJobStatusResponse {
 export interface RegressionResult {
   slope: number;
   intercept: number;
+  r_squared: number;
 }
 
 export interface ScatterResult {
@@ -134,6 +136,8 @@ export interface ScatterResult {
 export interface CorrelationMatrix {
   parameters: string[];
   matrix: number[][];
+  /** Paired sample size backing each cell's r — same shape as matrix. */
+  n: number[][];
 }
 
 export interface ComparisonRequest extends VizFilterParams {
