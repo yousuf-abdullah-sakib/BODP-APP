@@ -1,11 +1,19 @@
-from typing import BinaryIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import BinaryIO, Callable, Iterable
 
 import boto3
 import structlog
 from botocore.client import Config as BotoConfig
 from botocore.exceptions import ClientError
 
-from app.services.storage.base import StorageBackendError, StorageObject, StorageService
+from app.core.config import settings
+from app.services.storage.base import (
+    StorageBackendError,
+    StorageObject,
+    StorageService,
+    UploadItem,
+    UploadResult,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -34,13 +42,29 @@ class S3CompatibleBackend(StorageService):
         public_endpoint_url: str | None = None,
     ):
         self._name = name
+        # max_pool_connections/retries: benchmarked directly against real
+        # MinIO with a large Zarr store's many small chunk files (see
+        # Settings.STORAGE_MAX_POOL_CONNECTIONS's docstring) — the default
+        # boto3 pool (10) caps concurrent put_many() throughput regardless
+        # of how many worker threads are used, since threads beyond the
+        # pool size just queue on connection checkout. Standard retry mode
+        # covers transient failures (connection reset, timeout, 5xx) on
+        # every call this client makes, including inside put_many()'s
+        # threads, without a custom retry loop (Case 6: MinIO temporarily
+        # unavailable).
+        boto_config = BotoConfig(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+            max_pool_connections=settings.STORAGE_MAX_POOL_CONNECTIONS,
+            retries={"max_attempts": settings.STORAGE_MAX_RETRIES, "mode": "standard"},
+        )
         self._client = boto3.client(
             "s3",
             endpoint_url=endpoint_url,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region,
-            config=BotoConfig(signature_version="s3v4", s3={"addressing_style": "path"}),
+            config=boto_config,
         )
         # Presigned URLs are followed directly by an external client (a
         # browser, curl) — never routed through the backend — so they must
@@ -90,6 +114,62 @@ class S3CompatibleBackend(StorageService):
         if stat is None:
             raise StorageBackendError(f"Upload to {bucket}/{key} reported success but object not found")
         return stat
+
+    def put_many(
+        self,
+        bucket: str,
+        items: Iterable[UploadItem],
+        *,
+        content_type: str | None = None,
+        concurrency: int = 1,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[UploadResult]:
+        """Bounded-concurrency override of the base sequential
+        implementation — a real ThreadPoolExecutor with `concurrency`
+        workers, each uploading one object at a time via the same `put()`
+        (and therefore the same streaming `upload_fileobj`, never reading
+        a whole file into memory). `items` is consumed into a list once
+        (each element is a tiny path+key tuple, not file content) so
+        progress can be reported against a known total; no file's bytes
+        are read until the specific worker handling that item opens it.
+
+        Verified via direct benchmark against real MinIO with ~14,600
+        real Zarr chunk files (~55KB median): concurrency=16 against a
+        32-connection pool reached ~111 files/s vs ~54 files/s sequential
+        — see Settings.STORAGE_UPLOAD_CONCURRENCY's docstring for the full
+        sweep. One item's failure never cancels or blocks the others —
+        every item still gets exactly one UploadResult, matching the base
+        implementation's contract, so a caller sees the complete picture
+        of what succeeded and what didn't even under partial failure."""
+        items = list(items)
+        total = len(items)
+        if total == 0:
+            return []
+
+        results_by_key: dict[str, UploadResult] = {}
+        completed = 0
+
+        def upload_one(item: UploadItem) -> UploadResult:
+            try:
+                with open(item.local_path, "rb") as f:
+                    self.put(bucket, item.key, f, content_type=content_type)
+                return UploadResult(key=item.key, ok=True)
+            except Exception as exc:
+                return UploadResult(key=item.key, ok=False, error=str(exc))
+
+        with ThreadPoolExecutor(max_workers=max(1, concurrency)) as executor:
+            futures = {executor.submit(upload_one, item): item for item in items}
+            for future in as_completed(futures):
+                result = future.result()
+                results_by_key[result.key] = result
+                completed += 1
+                if on_progress is not None:
+                    on_progress(completed, total)
+
+        # Preserve input order in the returned list — callers (e.g. an
+        # all-succeeded fast-path check) shouldn't have to care that
+        # completion order differs from submission order.
+        return [results_by_key[item.key] for item in items]
 
     def get(self, bucket: str, key: str) -> BinaryIO:
         try:

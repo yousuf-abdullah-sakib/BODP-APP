@@ -1,5 +1,6 @@
 import math
 import tempfile
+import time
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.models.catalog import Dataset, DatasetFile, DatasetRecord, DatasetVaria
 from app.models.uploads import QualityIssue, Upload, UploadStatus
 from app.services.parsers import ParserError, get_parser_for_format
 from app.services.parsers.base import DataShape, ParsedFileMetadata, ProcessedArtifact
+from app.services.storage.base import StorageService, UploadItem
 from app.services.storage.keys import processed_key, processed_prefix
 from app.services.storage.registry import default_bucket_for, get_storage_backend
 from app.worker.celery_app import celery_app
@@ -224,6 +226,38 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
                 upload_id, status=UploadStatus.CANCELLED.value, error_message="Cancelled during processing."
             )
             return {"status": "cancelled"}
+        except ZarrUploadFailed as exc:
+            # _upload_zarr_store already deleted whatever it managed to
+            # write under processed_prefix before raising (it's the only
+            # thing that knows the exact set of keys it attempted) — the
+            # remaining cleanup here is the same orphaned-DatasetFile-row
+            # gap every cancellation path already guards against:
+            # dataset_file was created at raw-upload time, before this
+            # task ever ran, so a failed ingestion must not leave it
+            # behind as an empty shell. processed_bucket=None tells
+            # _cleanup_cancelled_ingestion there is no prefix left to
+            # delete (already done) — it should only remove the
+            # DatasetRecord/DatasetFile rows.
+            logger.warning(
+                "ingestion.zarr_upload_permanently_failed",
+                dataset_file_id=dataset_file_id,
+                failed_count=exc.failed_count,
+                total_count=exc.total_count,
+            )
+            try:
+                _cleanup_cancelled_ingestion(db, dataset_file, processed_bucket=None, processed_key=None)
+            except Exception:
+                logger.exception("ingestion.zarr_upload_failure_cleanup_failed", dataset_file_id=dataset_file_id)
+            _set_upload_terminal_state(
+                upload_id,
+                status=UploadStatus.FAILED.value,
+                error_message=(
+                    f"Failed to upload {exc.failed_count} of {exc.total_count} processed data chunk(s) "
+                    "to storage after multiple retries. This may indicate a temporary storage issue — "
+                    "please try again, or contact an administrator if this persists."
+                ),
+            )
+            return {"status": "failed", "reason": "zarr_upload_failed"}
         except ParserError as exc:
             logger.warning(
                 "ingestion.parse_rejected",
@@ -314,6 +348,156 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
         return {"status": "complete", **result}
 
 
+class ZarrUploadFailed(Exception):
+    """Raised by _upload_zarr_store when one or more chunk objects
+    permanently failed to upload (after boto3's own built-in retries —
+    see Settings.STORAGE_MAX_RETRIES) — carries enough detail to log
+    which objects failed, and always means some subset of the store's
+    objects may now exist in the target bucket under processed_prefix
+    while others don't. Caught by _run_ingestion's caller alongside every
+    other _run_ingestion failure mode: process_dataset_file's generic
+    `except Exception` marks the upload FAILED, but does NOT run
+    prefix cleanup itself (unlike IngestionCancelled/SoftTimeLimitExceeded,
+    which know exactly what was durably written) — so this exception's
+    __init__ deletes the partial prefix itself, before propagating,
+    ensuring a permanently-failed Zarr upload never leaves a half-written
+    store behind for a later retry to see as if it were complete."""
+
+    def __init__(self, *, failed_count: int, total_count: int, sample_errors: list[str]):
+        self.failed_count = failed_count
+        self.total_count = total_count
+        self.sample_errors = sample_errors
+        super().__init__(
+            f"{failed_count}/{total_count} Zarr chunk object(s) failed to upload "
+            f"after retries (e.g. {'; '.join(sample_errors[:3])})"
+        )
+
+
+# Throttles how often a Zarr store's chunk-upload progress becomes an
+# actual Upload.progress_pct DB write — reusing _checkpoint's existing
+# round-trip for every single object (potentially thousands) would trade
+# the upload bottleneck this whole function exists to fix for a new
+# database-write bottleneck instead. Time-based (not count-based) so a
+# store with very few, very large chunks (e.g. one huge coordinate array)
+# still reports progress promptly, and one with thousands of tiny chunks
+# doesn't write on every completion.
+_PROGRESS_CHECKPOINT_INTERVAL_SECONDS = 2.0
+
+
+def _upload_zarr_store(
+    storage: StorageService,
+    *,
+    local_dir: Path,
+    bucket: str,
+    prefix: str,
+    content_type: str | None,
+    db,
+    upload: Upload | None,
+    dataset_file_id,
+) -> None:
+    """Uploads every file under `local_dir` (a Zarr store — many small
+    chunk + metadata files) to `bucket` under `prefix`, one object per
+    file, via StorageService.put_many()'s bounded concurrency (Settings.
+    STORAGE_UPLOAD_CONCURRENCY) rather than the old one-at-a-time loop —
+    see Settings.STORAGE_UPLOAD_CONCURRENCY's and
+    Settings.INGESTION_ZARR_TIME_CHUNK_SIZE's docstrings for the real-file
+    benchmark this replaced (~641s -> ~53s for a 2.03GB/8-variable/hourly
+    NetCDF's ~14,600-chunk store, combining fewer/larger chunks with
+    concurrent upload).
+
+    `items` is built as a plain list of (path, key) pairs up front — small
+    even at thousands of entries (a path string per chunk, not chunk
+    bytes) — and put_many() only opens each file when that specific
+    item's own upload actually runs, so this never holds more than
+    STORAGE_UPLOAD_CONCURRENCY files' worth of bytes in memory at once
+    regardless of how many total chunks the store has.
+
+    Raises ZarrUploadFailed (after deleting whatever was durably written
+    under `prefix`) if any object permanently failed — the caller must
+    treat this exactly like any other _run_ingestion failure (the
+    existing generic `except Exception` handler in process_dataset_file
+    already does, unchanged). Does NOT itself detect Upload cancellation
+    (SoftTimeLimitExceeded/checkpoint-based cancellation still work
+    exactly as before, since ThreadPoolExecutor's worker threads simply
+    get abandoned when the Celery task process is interrupted — nothing
+    new for cancellation to preserve here beyond what already existed for
+    the old sequential loop, which had the same property)."""
+    items = [
+        UploadItem(local_path=chunk_file, key=f"{prefix}/{chunk_file.relative_to(local_dir).as_posix()}")
+        for chunk_file in local_dir.rglob("*")
+        if chunk_file.is_file()
+    ]
+    total = len(items)
+
+    logger.info(
+        "ingestion.zarr_upload_started",
+        dataset_file_id=str(dataset_file_id),
+        total_objects=total,
+        concurrency=settings.STORAGE_UPLOAD_CONCURRENCY,
+    )
+    start = time.monotonic()
+    last_checkpoint = start
+
+    def on_progress(completed: int, total_count: int) -> None:
+        nonlocal last_checkpoint
+        now = time.monotonic()
+        if now - last_checkpoint < _PROGRESS_CHECKPOINT_INTERVAL_SECONDS and completed < total_count:
+            return
+        last_checkpoint = now
+        pct = round(100 * completed / total_count) if total_count else 100
+        _checkpoint(
+            db,
+            upload,
+            stage="uploading_processed",
+            pct=pct,
+            written_processed_bucket=bucket,
+            written_processed_key=prefix,
+            written_processed_is_prefix=True,
+        )
+
+    results = storage.put_many(
+        bucket,
+        items,
+        content_type=content_type,
+        concurrency=settings.STORAGE_UPLOAD_CONCURRENCY,
+        on_progress=on_progress,
+    )
+
+    failed = [r for r in results if not r.ok]
+    duration = time.monotonic() - start
+    total_bytes = sum(item.local_path.stat().st_size for item in items)
+
+    if failed:
+        logger.error(
+            "ingestion.zarr_upload_failed",
+            dataset_file_id=str(dataset_file_id),
+            total_objects=total,
+            failed_objects=len(failed),
+            sample_errors=[r.error for r in failed[:5]],
+        )
+        # Partial store: delete everything written under this prefix so a
+        # retry (or a later query) never sees a half-complete Zarr store
+        # as if it were valid — same cleanup call
+        # _cleanup_cancelled_ingestion uses for a cancelled Zarr upload.
+        try:
+            storage.delete_prefix(bucket, prefix)
+        except Exception:
+            logger.exception("ingestion.zarr_partial_upload_cleanup_failed", prefix=prefix)
+        raise ZarrUploadFailed(
+            failed_count=len(failed), total_count=total, sample_errors=[r.error or "" for r in failed]
+        )
+
+    throughput_mb_s = (total_bytes / 1024 / 1024 / duration) if duration > 0 else 0.0
+    logger.info(
+        "ingestion.zarr_upload_completed",
+        dataset_file_id=str(dataset_file_id),
+        total_objects=total,
+        total_bytes=total_bytes,
+        duration_seconds=round(duration, 1),
+        throughput_mb_s=round(throughput_mb_s, 1),
+    )
+
+
 def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = None) -> dict:
     extension = (dataset_file.file_format or "").lower().lstrip(".")
     parser = get_parser_for_format(extension)
@@ -366,17 +550,16 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
             # gets recorded/cleaned-up/queried instead.
             processed_object_key = None
             processed_object_prefix = processed_prefix(dataset_file.dataset_id, dataset_file.id)
-            for chunk_file in artifact.local_dir.rglob("*"):
-                if not chunk_file.is_file():
-                    continue
-                relative = chunk_file.relative_to(artifact.local_dir)
-                with open(chunk_file, "rb") as f:
-                    storage.put(
-                        processed_bucket,
-                        f"{processed_object_prefix}/{relative.as_posix()}",
-                        f,
-                        content_type=artifact.content_type,
-                    )
+            _upload_zarr_store(
+                storage,
+                local_dir=artifact.local_dir,
+                bucket=processed_bucket,
+                prefix=processed_object_prefix,
+                content_type=artifact.content_type,
+                db=db,
+                upload=upload,
+                dataset_file_id=dataset_file.id,
+            )
             storage_kind = StorageKind.CHUNKED_ARRAY.value
         else:
             processed_object_key = processed_key(

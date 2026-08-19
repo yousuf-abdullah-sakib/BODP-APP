@@ -394,3 +394,117 @@ class TestIngestionCancellationCheckpoints:
             # up beyond what the /cancel endpoint itself already handled
             # for a QUEUED upload.
             assert await db.get(DatasetFile, uuid.UUID(dataset_file_id)) is not None
+
+
+class TestZarrUploadCancellationMidConcurrentUpload:
+    """Performance fix (Large NetCDF Ingestion Timeout task): the old
+    sequential Zarr chunk-upload loop had no cancellation checkpoint
+    DURING the upload itself (only before it, at checkpoint 2, and after
+    it, at checkpoint 3) — a cancel request mid-upload only ever took
+    effect on the NEXT stage boundary, same as every other step in this
+    pipeline. put_many()'s on_progress callback (ingestion.py's
+    _upload_zarr_store) now calls the same _checkpoint() during the
+    upload, at most every ~2s — this must preserve that exact contract
+    (not regress it, and not require a NEW guarantee this replaced code
+    never had): cancelling while chunk objects are still being uploaded
+    stops the ingestion, cleans up whatever was durably written, and
+    leaves no orphaned DatasetFile or partial Zarr store behind."""
+
+    async def _upload_raw_netcdf_without_ingesting(self, client, headers, dataset_id, tmp_path) -> tuple[str, str]:
+        from app.services.dataset_file_service import upload_dataset_file
+        from tests.test_dataset_upload import _make_netcdf_bytes
+
+        class _FakeUploadFile:
+            def __init__(self, data: bytes):
+                self._data = data
+                self._sent = False
+
+            async def read(self, size: int) -> bytes:
+                if self._sent:
+                    return b""
+                self._sent = True
+                return self._data
+
+        async with AsyncSessionLocal() as db:
+            upload, dataset_file = await upload_dataset_file(
+                db,
+                dataset_id=uuid.UUID(dataset_id),
+                filename="cancel_during_zarr_upload.nc",
+                file_stream=_FakeUploadFile(_make_netcdf_bytes(tmp_path)),
+                uploaded_by=None,
+            )
+            return str(upload.id), str(dataset_file.id)
+
+    async def test_cancellation_during_zarr_chunk_upload_stops_and_cleans_up(self, client, tmp_path):
+        from app.worker.tasks import ingestion as ingestion_module
+
+        headers = await _admin_headers(client)
+        dataset_id = await _create_dataset(client, headers)
+        upload_id, dataset_file_id = await self._upload_raw_netcdf_without_ingesting(
+            client, headers, dataset_id, tmp_path
+        )
+
+        # Force _upload_zarr_store's on_progress to fire on every single
+        # completed object (bypassing the normal 2-second throttle, which
+        # would never trigger during this small fixture's sub-second
+        # upload) — then cancel on progress callback #2, simulating a
+        # cancel request landing while chunk objects are still actively
+        # being uploaded by put_many()'s worker threads, not before or
+        # after the whole stage.
+        real_upload_zarr_store = ingestion_module._upload_zarr_store
+        progress_calls = {"n": 0}
+
+        def _patched_upload_zarr_store(storage, *, local_dir, bucket, prefix, content_type, db, upload, dataset_file_id):
+            items = [
+                ingestion_module.UploadItem(
+                    local_path=f, key=f"{prefix}/{f.relative_to(local_dir).as_posix()}"
+                )
+                for f in local_dir.rglob("*")
+                if f.is_file()
+            ]
+
+            def on_progress(completed, total):
+                progress_calls["n"] += 1
+                if progress_calls["n"] == 2 and upload is not None:
+                    # Simulate the cancel request landing right now — same
+                    # mutate-and-commit-on-the-task's-own-session pattern
+                    # TestIngestionCancellationCheckpoints uses above.
+                    upload.status = UploadStatus.CANCELLED.value
+                    db.commit()
+                ingestion_module._checkpoint(
+                    db, upload, stage="uploading_processed",
+                    pct=round(100 * completed / total) if total else 100,
+                    written_processed_bucket=bucket, written_processed_key=prefix,
+                    written_processed_is_prefix=True,
+                )
+
+            storage.put_many(bucket, items, content_type=content_type, concurrency=1, on_progress=on_progress)
+
+        ingestion_module._upload_zarr_store = _patched_upload_zarr_store
+        try:
+            result = ingestion_module.process_dataset_file.run(dataset_file_id, upload_id)
+        finally:
+            ingestion_module._upload_zarr_store = real_upload_zarr_store
+
+        assert result["status"] == "cancelled"
+
+        async with AsyncSessionLocal() as db:
+            upload = await db.get(Upload, uuid.UUID(upload_id))
+            assert upload.status == UploadStatus.CANCELLED.value
+            # No orphaned DatasetFile — same guarantee the sequential
+            # loop's cancellation path already provided.
+            assert await db.get(DatasetFile, uuid.UUID(dataset_file_id)) is None
+
+        # No partial Zarr store left behind in storage either — every
+        # object put_many() managed to upload before cancellation was
+        # detected must have been deleted via delete_prefix() (checkpoint
+        # 3's written_processed_key, passed to _cleanup_cancelled_ingestion
+        # by IngestionCancelled's exception handler).
+        from app.services.storage.registry import get_storage_backend
+
+        storage = get_storage_backend("vps_minio")
+        paginator = storage._client.get_paginator("list_objects_v2")
+        remaining = 0
+        for page in paginator.paginate(Bucket="bodp-vps", Prefix=f"processed/{dataset_id}/{dataset_file_id}"):
+            remaining += len(page.get("Contents", []))
+        assert remaining == 0

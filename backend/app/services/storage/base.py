@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import BinaryIO
+from pathlib import Path
+from typing import BinaryIO, Callable, Iterable, NamedTuple
 
 
 class StorageBackendError(Exception):
@@ -19,6 +20,28 @@ class StorageObject:
     size_bytes: int
     etag: str | None = None
     content_type: str | None = None
+
+
+class UploadItem(NamedTuple):
+    """One file destined for put_many() — a local path and its target
+    key, not the file's bytes. put_many() implementations open each path
+    only when that item's own upload actually runs, so queuing thousands
+    of items never holds thousands of file handles or any file content in
+    memory at once."""
+
+    local_path: Path
+    key: str
+
+
+class UploadResult(NamedTuple):
+    """Per-item outcome from put_many() — always exactly one of these per
+    input UploadItem, success or failure, so a caller can tell a total
+    failure (nothing uploaded) from a partial failure (some objects now
+    exist in storage, some don't) and clean up accordingly."""
+
+    key: str
+    ok: bool
+    error: str | None = None
 
 
 class StorageService(ABC):
@@ -44,6 +67,52 @@ class StorageService(ABC):
     ) -> StorageObject:
         """Stream-upload `data` to `bucket/key`. Must not buffer the whole
         file in memory — large NetCDF/CSV uploads are expected."""
+
+    def put_many(
+        self,
+        bucket: str,
+        items: Iterable[UploadItem],
+        *,
+        content_type: str | None = None,
+        concurrency: int = 1,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> list[UploadResult]:
+        """Uploads many local files to `bucket`, one object per UploadItem
+        — the many-small-object case a Zarr store's chunk files are (see
+        ingestion.py's processed-artifact upload). Each item's bytes are
+        only ever read from its own `local_path` at the moment that one
+        item's upload runs (via `put()`, which itself streams) — `items`
+        can be an arbitrarily large iterable without the caller or this
+        method ever holding more than `concurrency` files' worth of bytes
+        open at once.
+
+        Every item gets exactly one UploadResult (never raises for a
+        single item's failure — errors are reported, not propagated) so a
+        caller can distinguish "some objects now exist in storage, some
+        don't" from a clean total failure and clean up precisely.
+        `on_progress(completed_count, total_count)`, if given, is called
+        after every completed item (success or failure) — throttling how
+        often that translates into a DB write is the caller's job, not
+        this method's.
+
+        Default implementation: sequential (concurrency is accepted for
+        interface consistency but ignored) — correct for any backend,
+        just not fast for one with thousands of small objects. The only
+        current backend (S3CompatibleBackend) overrides this with a real
+        bounded-concurrency upload; this fallback exists so a future
+        backend is never required to implement concurrency to be usable."""
+        items = list(items)
+        results: list[UploadResult] = []
+        for item in items:
+            try:
+                with open(item.local_path, "rb") as f:
+                    self.put(bucket, item.key, f, content_type=content_type)
+                results.append(UploadResult(key=item.key, ok=True))
+            except Exception as exc:
+                results.append(UploadResult(key=item.key, ok=False, error=str(exc)))
+            if on_progress is not None:
+                on_progress(len(results), len(items))
+        return results
 
     @abstractmethod
     def get(self, bucket: str, key: str) -> BinaryIO:

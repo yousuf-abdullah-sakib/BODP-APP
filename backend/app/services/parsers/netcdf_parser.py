@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from app.core.config import settings
 from app.services.parsers.base import (
     DataShape,
     FileParser,
@@ -24,12 +25,13 @@ _TIME_NAMES = ("time", "date", "datetime", "valid_time")
 # Chunk-axis strategy: chunk along the detected time dimension when one
 # exists (matches the stated preference for oceanographic/model data,
 # where "give me the next N time steps" is the natural access pattern
-# for both ingestion and later Visualize time-series queries) — sized
-# so each chunk stays comfortably small regardless of how large the
-# spatial grid per time step is. Falls back to dask's own "auto"
-# chunking (spatial-axis-based) for a file with no detected time
-# dimension at all (e.g. a static multidimensional field).
-_TIME_CHUNK_SIZE = 24  # e.g. 24 monthly steps, or 24 hourly steps — small either way
+# for both ingestion and later Visualize time-series queries). Falls back
+# to dask's own "auto" chunking (spatial-axis-based) for a file with no
+# detected time dimension at all (e.g. a static multidimensional field).
+# Sourced from Settings.INGESTION_ZARR_TIME_CHUNK_SIZE — see that field's
+# docstring for the real-file benchmark (object count, write time, and
+# query performance) behind its default value.
+_TIME_CHUNK_SIZE = settings.INGESTION_ZARR_TIME_CHUNK_SIZE
 
 
 def _find_coord(ds: xr.Dataset, names: tuple[str, ...]) -> str | None:

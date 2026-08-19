@@ -458,6 +458,72 @@ class TestNetcdfUpload:
         assert "expver" not in names
 
 
+class TestZarrUploadFailureCleanup:
+    """Performance fix (Large NetCDF Ingestion Timeout task): verifies the
+    put_many()-based concurrent Zarr chunk upload's failure path — a
+    permanent per-object failure must fail the whole ingestion cleanly,
+    leave no orphaned DatasetFile row and no partial Zarr store behind,
+    and report a clear error, exactly like every other ingestion failure
+    mode in this file (ParserError, size-limit, missing CRS, etc.)."""
+
+    async def test_permanent_chunk_upload_failure_fails_cleanly_with_no_orphans(
+        self, client, admin_headers, tmp_path, monkeypatch
+    ):
+        import uuid as uuid_module
+
+        import app.worker.tasks.ingestion as ingestion_module
+        from app.core.database import AsyncSessionLocal
+        from app.models.catalog import DatasetFile
+        from app.services.storage.base import UploadResult
+        from app.services.storage.registry import get_storage_backend
+
+        real_backend = get_storage_backend("vps_minio")
+
+        class _FailingOneItemBackend:
+            """Wraps the real backend so every object actually reaches
+            MinIO except one, which always reports failure — the
+            realistic partial-failure shape put_many() must handle,
+            without needing to guess boto3's own internal retry/error
+            plumbing."""
+
+            def __getattr__(self, name):
+                return getattr(real_backend, name)
+
+            def put_many(self, bucket, items, **kwargs):
+                items = list(items)
+                results = real_backend.put_many(bucket, items, **kwargs)
+                # Force exactly one result to failed, regardless of what
+                # actually happened in storage — deterministic across
+                # runs/environments, and still exercises the real
+                # concurrent upload path for every other item.
+                forced = list(results)
+                forced[0] = UploadResult(key=forced[0].key, ok=False, error="simulated permanent failure")
+                return forced
+
+        monkeypatch.setattr(ingestion_module, "get_storage_backend", lambda backend: _FailingOneItemBackend())
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("aux_coords.nc", _make_netcdf_bytes(tmp_path), "application/x-netcdf")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+        upload_id = r.json()["upload"]["id"]
+
+        status_resp = await client.get(f"/api/v1/admin/datasets/uploads/{upload_id}", headers=admin_headers)
+        body = status_resp.json()
+        assert body["status"] == "failed"
+        assert "storage" in body["error_message"].lower()
+
+        # No orphaned DatasetFile left behind — same guarantee every other
+        # ingestion failure path in this file already provides.
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(DatasetFile).where(DatasetFile.dataset_id == uuid_module.UUID(dataset_id))
+            )
+            assert result.scalars().all() == []
+
+
 class TestMatUpload:
     async def test_upload_mat_succeeds(self, client, admin_headers, tmp_path):
         dataset_id = await _create_dataset(client, admin_headers)

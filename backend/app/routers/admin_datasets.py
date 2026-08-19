@@ -272,7 +272,29 @@ async def upload_dataset_file_endpoint(
     # than stale pre-ingestion state. In real async/broker mode this is a
     # no-op refresh (task genuinely hasn't run yet), which is correct: a 202
     # response is expected to reflect "queued", not "already processed".
-    await db.refresh(dataset_file)
+    #
+    # A failed ingestion (parse error, permanent storage failure, or
+    # cancellation) deletes this exact DatasetFile row as part of its
+    # cleanup (see ingestion.py's IngestionCancelled/ZarrUploadFailed
+    # handlers) — in eager mode that deletion happens, via a completely
+    # separate DB session (get_sync_db() inside the Celery task), before
+    # this point. This session (`db`) never touched that deletion itself,
+    # so its identity map still holds the pre-deletion row and a plain
+    # db.get() would return the stale cached object without truly
+    # checking the database — populate_existing=True forces a genuine
+    # SELECT. Without a hit, keep the pre-ingestion in-memory snapshot
+    # instead of calling refresh() (which would raise InvalidRequestError
+    # against a row that's genuinely gone): it's already the correct
+    # thing to show — upload.status/.error_message above reflects the
+    # real failure, and there is no "processed" state to pull from a row
+    # that no longer exists.
+    exists_check = await db.execute(
+        select(type(dataset_file))
+        .where(type(dataset_file).id == dataset_file.id)
+        .execution_options(populate_existing=True)
+    )
+    if exists_check.scalar_one_or_none() is not None:
+        await db.refresh(dataset_file)
 
     return DatasetFileUploadResponse(
         upload=UploadStatusResponse.model_validate(upload),

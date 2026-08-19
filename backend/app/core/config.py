@@ -98,6 +98,32 @@ class Settings(BaseSettings):
     STORAGE_CLOUD_BUCKET: str | None = None
     STORAGE_CLOUD_REGION: str = "us-east-1"
 
+    # boto3 client tuning (large-file/many-object ingestion performance).
+    # STORAGE_MAX_POOL_CONNECTIONS raises boto3's default HTTP connection
+    # pool (10) so StorageService.put_many()'s concurrent uploads don't
+    # serialize on pool checkout — measured directly against real MinIO
+    # with a 2.03GB NetCDF's ~14,600-object Zarr store (see ingestion.py's
+    # _upload_zarr_store docstring for the full benchmark): concurrency=16
+    # was capped at ~80 files/s by the default pool of 10, and reached
+    # ~110 files/s once the pool was widened to 32 — chosen as
+    # concurrency*2 so every worker thread can always hold its own
+    # connection with headroom, not tuned independently.
+    STORAGE_MAX_POOL_CONNECTIONS: int = 32
+    # boto3's built-in retry count for transient errors (connection reset,
+    # timeout, 5xx) on every S3 call this client makes — covers Case 6
+    # ("MinIO temporarily becomes unavailable") without any custom retry
+    # loop, since this is exactly what botocore's standard retry mode
+    # already does per-request.
+    STORAGE_MAX_RETRIES: int = 3
+    # Bounded worker count for StorageService.put_many()'s concurrent
+    # object upload — NOT unlimited, so a store with tens of thousands of
+    # chunk files can't spawn tens of thousands of threads. Benchmarked
+    # directly (real MinIO, real ~55KB Zarr chunk files): throughput
+    # plateaued around this value (16 threads / 32-connection pool ≈
+    # 111 files/s) with no further gain measured at 32 threads on the
+    # same pool size — this default reflects that plateau, not a guess.
+    STORAGE_UPLOAD_CONCURRENCY: int = 16
+
     MAX_UPLOAD_SIZE_MB: int = 5000
 
     # Legacy (pre-v7.3) MATLAB .mat files are read via scipy.io.loadmat,
@@ -165,6 +191,21 @@ class Settings(BaseSettings):
     # it should never fire under normal operation; only exists so a
     # genuinely wedged worker process doesn't block that queue forever.
     INGESTION_HARD_TIME_LIMIT_GRACE_SECONDS: int = 600
+
+    # Zarr write chunk size along the time axis (netcdf_parser.py /
+    # mat_gridded_struct.py's shared _TIME_CHUNK_SIZE) — was 24, raised to
+    # 200 after benchmarking against a real 2.03GB, 43,825-timestep, 8-
+    # variable NetCDF (BoB_WaveData_2010_2024.nc): 24 produced 14,644
+    # chunk objects (Zarr write itself 52.8s); 200 produced 1,788 (write
+    # 18.0s) — strictly faster on EVERY query pattern tested too (narrow
+    # time-range, full-range point series, spatial subset, resample-to-
+    # daily, resample-to-monthly — fewer dask chunks means less task-graph
+    # scheduling overhead, which dominates over "reads slightly more data
+    # per chunk than the narrowest possible request"). No tradeoff found
+    # at this dataset's scale; re-benchmark before raising further, since
+    # a large enough chunk eventually does start over-reading for narrow
+    # queries.
+    INGESTION_ZARR_TIME_CHUNK_SIZE: int = 200
 
     # --- Subset extraction (Master Plan §3 Phase 5) ---
     EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
