@@ -16,6 +16,7 @@ class BlogPostStatus(StrEnum):
 
 
 class BackupStatus(StrEnum):
+    RUNNING = "running"
     SUCCESS = "success"
     FAILED = "failed"
 
@@ -127,14 +128,32 @@ class Report(UUIDPKMixin, Base):
 
 
 class Backup(UUIDPKMixin, Base):
+    """Point-in-time recoverable pg_dump artifact (Master Plan §3 Phase 10
+    task 4). Mirrors Report's exact create->dispatch->poll->download shape
+    (see admin_reports_service.py) — celery_task_id was reserved on
+    Report from the start but omitted here originally; added by the
+    Phase 10.3 migration that wires this table up for the first time."""
+
     __tablename__ = "backups"
 
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     storage_key: Mapped[str | None] = mapped_column(String(1024))
+    celery_task_id: Mapped[str | None] = mapped_column(String(255))
+    error_message: Mapped[str | None] = mapped_column(String(2000))
+    # Row counts for a handful of core tables, captured at dump time
+    # (worker/tasks/backups.py). Comparing a restored copy's counts
+    # against THESE (not a fresh live query at verification time) is
+    # what makes app/scripts/test_backup_restore.py's comparison
+    # meaningful — the live database is a moving target by definition,
+    # so a live-vs-restored comparison is inherently racy against any
+    # write that happens between dump and verification. Nullable since
+    # older rows (before this column existed) never captured it.
+    row_counts: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class SiteSettings(Base):

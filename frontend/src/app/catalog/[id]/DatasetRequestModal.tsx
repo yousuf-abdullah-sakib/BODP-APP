@@ -21,13 +21,46 @@ interface DatasetRequestModalProps {
   onSubmitted: () => void;
 }
 
+// Data Page Filter & Extraction Audit fix (critical #1): the drawn/
+// uploaded AOI (criteria.bounds) is only ONE of two ways a user can set a
+// spatial extent — the plain Latitude/Longitude Min/Max number inputs are
+// the other, and previously never reached search_criteria at all. Mirrors
+// useDatasetFilters.ts's own effectiveLatMin/etc. fallback exactly
+// (bounds wins when set, since it's the more precise polygon-derived
+// bbox; the plain typed fields are the fallback) so the request payload
+// always reflects the SAME spatial extent the live preview/matching-count
+// just showed the user, regardless of which of the two inputs they used.
+function boundsFromCriteria(criteria: DatasetDetailFilters): SearchCriteria["bounds"] {
+  if (criteria.bounds) {
+    return {
+      lat_min: criteria.bounds.latMin,
+      lat_max: criteria.bounds.latMax,
+      lon_min: criteria.bounds.lonMin,
+      lon_max: criteria.bounds.lonMax,
+    };
+  }
+  if (criteria.latMin && criteria.latMax && criteria.lonMin && criteria.lonMax) {
+    return {
+      lat_min: Number(criteria.latMin),
+      lat_max: Number(criteria.latMax),
+      lon_min: Number(criteria.lonMin),
+      lon_max: Number(criteria.lonMax),
+    };
+  }
+  return undefined;
+}
+
+const MAX_SUPPORTING_DOCUMENT_SIZE_MB = 3;
+const MAX_SUPPORTING_DOCUMENT_SIZE_BYTES = MAX_SUPPORTING_DOCUMENT_SIZE_MB * 1024 * 1024;
+
 function toSearchCriteria(criteria: DatasetDetailFilters): SearchCriteria | undefined {
+  const bounds = boundsFromCriteria(criteria);
   const hasCriteria =
     criteria.parameters.length > 0 ||
     criteria.quality ||
     criteria.dateFrom ||
     criteria.dateTo ||
-    criteria.bounds ||
+    bounds ||
     criteria.depthMin ||
     criteria.depthMax ||
     criteria.source ||
@@ -49,14 +82,7 @@ function toSearchCriteria(criteria: DatasetDetailFilters): SearchCriteria | unde
     station: criteria.station || undefined,
     format: criteria.format || undefined,
     processing_level: criteria.processingLevel || undefined,
-    bounds: criteria.bounds
-      ? {
-          lat_min: criteria.bounds.latMin,
-          lat_max: criteria.bounds.latMax,
-          lon_min: criteria.bounds.lonMin,
-          lon_max: criteria.bounds.lonMax,
-        }
-      : undefined,
+    bounds,
   };
 }
 
@@ -139,10 +165,10 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
             {criteria.station && <div>Station: {criteria.station}</div>}
             {criteria.format && <div>Format: {criteria.format}</div>}
             {criteria.processingLevel && <div>Processing Level: {criteria.processingLevel}</div>}
-            {criteria.bounds && (
+            {searchCriteria?.bounds && (
               <div>
-                Spatial Bounds: Lat {criteria.bounds.latMin.toFixed(2)}°–{criteria.bounds.latMax.toFixed(2)}°, Lon{" "}
-                {criteria.bounds.lonMin.toFixed(2)}°–{criteria.bounds.lonMax.toFixed(2)}°
+                Spatial Bounds: Lat {searchCriteria.bounds.lat_min.toFixed(2)}°–{searchCriteria.bounds.lat_max.toFixed(2)}°, Lon{" "}
+                {searchCriteria.bounds.lon_min.toFixed(2)}°–{searchCriteria.bounds.lon_max.toFixed(2)}°
               </div>
             )}
           </div>
@@ -173,14 +199,25 @@ export default function DatasetRequestModal({ dataset, criteria, onClose, onSubm
             accept=".pdf,.doc,.docx"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) {
-                setFileName(f.name);
-                setFile(f);
+              if (!f) return;
+              if (f.size > MAX_SUPPORTING_DOCUMENT_SIZE_BYTES) {
+                toast(
+                  `File is ${(f.size / (1024 * 1024)).toFixed(1)}MB, which exceeds the ${MAX_SUPPORTING_DOCUMENT_SIZE_MB}MB limit.`,
+                  "error"
+                );
+                e.target.value = "";
+                setFileName("");
+                setFile(null);
+                return;
               }
+              setFileName(f.name);
+              setFile(f);
             }}
           />
           <div>📎 Click to upload a supporting document</div>
-          <div style={{ fontSize: "0.72rem", marginTop: "0.3rem", color: "var(--text-muted)" }}>PDF, DOC, DOCX — max 10MB</div>
+          <div style={{ fontSize: "0.72rem", marginTop: "0.3rem", color: "var(--text-muted)" }}>
+            PDF, DOC, DOCX — max {MAX_SUPPORTING_DOCUMENT_SIZE_MB}MB
+          </div>
           {fileName && <div style={{ marginTop: "0.5rem", fontSize: "0.78rem", color: "var(--accent)" }}>📎 {fileName}</div>}
         </label>
       </div>

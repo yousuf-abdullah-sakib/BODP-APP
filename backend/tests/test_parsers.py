@@ -152,6 +152,51 @@ class TestCsvParser:
         with pytest.raises(ParserError):
             sniff_format(bad, "csv")
 
+    def test_rejects_arbitrary_binary_disguised_as_csv(self, tmp_path):
+        """Phase 10 security audit finding: the original check only
+        rejected .csv content matching HDF5/NetCDF/TIFF magic bytes — an
+        arbitrary binary with no recognized scientific-format signature
+        (e.g. a renamed executable) passed this cheap sniff check
+        entirely, reaching the parser itself before being rejected there
+        (pd.read_csv fails to UTF-8-decode it) — never an ingestion
+        bypass, but a later, more expensive rejection than the function's
+        own "reject before any parser attempts real work" docstring
+        intends. Covers both a PE executable header (MZ) and an ELF
+        header (\\x7fELF) — the latter specifically because \\x7f alone is
+        a valid single-byte UTF-8 codepoint and would incorrectly pass a
+        decode-only check (confirmed by testing an earlier, decode-only
+        version of the fix — it let this exact input through)."""
+        pe_like = tmp_path / "fake_pe.csv"
+        pe_like.write_bytes(b"MZ\x90\x00\x90\x00\x90\x00\x90\x00")
+        with pytest.raises(ParserError):
+            sniff_format(pe_like, "csv")
+
+        elf_like = tmp_path / "fake_elf.csv"
+        elf_like.write_bytes(b"\x7fELF\x00\x00\x00\x00")
+        with pytest.raises(ParserError):
+            sniff_format(elf_like, "csv")
+
+    def test_accepts_legitimate_non_ascii_csv_encodings(self, tmp_path):
+        """Regression guard for the fix above: real CSVs with a UTF-8 BOM
+        (common from Excel exports), genuine non-ASCII UTF-8 content
+        (e.g. Bengali station names, directly relevant to this project's
+        real data), and legacy Latin-1 encoding must all still sniff as
+        valid CSV — the binary-content check must not become a
+        false-positive text-encoding gate."""
+        import codecs
+
+        bom = tmp_path / "bom.csv"
+        bom.write_bytes(codecs.BOM_UTF8 + b"lat,lon,value\n21.0,90.0,25.5\n")
+        assert sniff_format(bom, "csv") == "csv"
+
+        bengali = tmp_path / "bengali.csv"
+        bengali.write_bytes("lat,lon,station\n21.0,90.0,ঢাকা\n".encode("utf-8"))
+        assert sniff_format(bengali, "csv") == "csv"
+
+        latin1 = tmp_path / "latin1.csv"
+        latin1.write_bytes("lat,lon,name\n21.0,90.0,café\n".encode("latin-1"))
+        assert sniff_format(latin1, "csv") == "csv"
+
     def test_ragged_rows_rejected_at_parse(self, tmp_path):
         """Inconsistent column counts per row pass the cheap magic-byte
         sniff (plain text, no binary signature) but must still be rejected
@@ -417,6 +462,99 @@ class TestMatParser:
         bad.write_bytes(b"not a real mat file at all, just garbage bytes here")
         with pytest.raises(ParserError):
             sniff_format(bad, "mat")
+
+    def test_legacy_mat_time_column_converted_from_datenum(self, tmp_path):
+        """Regression test (Visualization & Filter Reliability
+        investigation): a tabular .mat file's own real time column was
+        previously written to Parquet as a raw MATLAB datenum float,
+        which every downstream date-range query then crashed on
+        (confirmed via direct reproduction against a real dataset —
+        DuckDB's 'Conversion Error: Unimplemented type for cast (DOUBLE
+        -> TIMESTAMP)'). Expected values below are computed via a
+        second, independent formula (datetime.fromordinal), not by
+        calling the same datenum_to_datetime helper the implementation
+        uses — a real hand-verification, not a tautological one."""
+        from datetime import datetime, timedelta
+
+        p = tmp_path / "sample_with_time.mat"
+        n = 5
+        datenums = np.array([738521.0 + i for i in range(n)])
+        scipy.io.savemat(
+            p,
+            {
+                "time": datenums,
+                "lat": np.array([20.5 + i * 0.1 for i in range(n)]),
+                "lon": np.array([90.0 + i * 0.1 for i in range(n)]),
+                "temperature": np.array([25.0 + i * 0.2 for i in range(n)]),
+            },
+        )
+        parser = get_parser_for_format("mat")
+        artifact = parser.to_processed(p, tmp_path)
+        df = pd.read_parquet(artifact.local_path).sort_values("time").reset_index(drop=True)
+
+        assert pd.api.types.is_datetime64_any_dtype(df["time"])
+        expected = [
+            datetime.fromordinal(int(d) - 366) + timedelta(days=float(d) % 1) for d in datenums
+        ]
+        for actual_ts, expected_dt in zip(df["time"], expected):
+            assert actual_ts.to_pydatetime().replace(microsecond=0) == expected_dt.replace(microsecond=0)
+
+    def test_legacy_mat_numeric_non_datenum_time_column_left_untouched(self, tmp_path):
+        """A numeric column merely named 'time' that is NOT in a
+        plausible MATLAB datenum range (e.g. elapsed seconds/a row
+        index) must not be coerced into a bogus date — is_plausible_
+        datenum's range guard is what prevents that, and this proves it
+        actually gates the conversion rather than converting
+        unconditionally on name match alone."""
+        p = tmp_path / "sample_non_datenum_time.mat"
+        n = 5
+        elapsed_seconds = np.array([0.0, 10.0, 20.0, 30.0, 40.0])
+        scipy.io.savemat(
+            p,
+            {
+                "time": elapsed_seconds,
+                "lat": np.array([20.5 + i * 0.1 for i in range(n)]),
+                "lon": np.array([90.0 + i * 0.1 for i in range(n)]),
+                "temperature": np.array([25.0 + i * 0.2 for i in range(n)]),
+            },
+        )
+        parser = get_parser_for_format("mat")
+        artifact = parser.to_processed(p, tmp_path)
+        df = pd.read_parquet(artifact.local_path)
+
+        assert pd.api.types.is_numeric_dtype(df["time"])
+        assert sorted(df["time"].tolist()) == elapsed_seconds.tolist()
+
+    def test_v73_mat_time_column_converted_from_datenum(self, tmp_path):
+        """Same regression as test_legacy_mat_time_column_converted_from_
+        datenum, but for the v7.3 (HDF5/chunked) ingestion path — a
+        separate code path with its own independent bug (the chunked
+        writer never reused the eager path's conversion either)."""
+        from datetime import datetime, timedelta
+
+        p = tmp_path / "sample_v73_with_time.mat"
+        n = 5
+        datenums = np.array([738521.0 + i for i in range(n)])
+        with h5py.File(p, "w", userblock_size=512) as f:
+            f.create_dataset("time", data=datenums)
+            f.create_dataset("lat", data=np.array([20.5 + i * 0.1 for i in range(n)]))
+            f.create_dataset("lon", data=np.array([90.0 + i * 0.1 for i in range(n)]))
+            f.create_dataset("temperature", data=np.array([25.0 + i * 0.2 for i in range(n)]))
+        with open(p, "r+b") as f:
+            header = b"MATLAB 7.3 MAT-file, Platform: PCWIN64, Created on: test" + b" " * 60
+            f.seek(0)
+            f.write(header[:116])
+
+        parser = get_parser_for_format("mat")
+        artifact = parser.to_processed(p, tmp_path)
+        df = pd.read_parquet(artifact.local_path).sort_values("time").reset_index(drop=True)
+
+        assert pd.api.types.is_datetime64_any_dtype(df["time"])
+        expected = [
+            datetime.fromordinal(int(d) - 366) + timedelta(days=float(d) % 1) for d in datenums
+        ]
+        for actual_ts, expected_dt in zip(df["time"], expected):
+            assert actual_ts.to_pydatetime().replace(microsecond=0) == expected_dt.replace(microsecond=0)
 
 
 def _save_gridded_struct_mat(

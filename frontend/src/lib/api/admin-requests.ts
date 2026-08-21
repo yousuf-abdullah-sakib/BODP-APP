@@ -35,6 +35,14 @@ export async function rejectRequest(requestId: string, reason: string): Promise<
   });
 }
 
+export async function getSupportingDocumentDownloadUrl(
+  requestId: string
+): Promise<{ download_url: string; filename: string }> {
+  return apiFetch<{ download_url: string; filename: string }>(
+    `/admin/requests/${requestId}/supporting-document/download`
+  );
+}
+
 export async function getAdminGrants(status?: string): Promise<GrantDetail[]> {
   const qs = status ? `?status=${encodeURIComponent(status)}` : "";
   return apiFetch<GrantDetail[]>(`/admin/grants${qs}`);

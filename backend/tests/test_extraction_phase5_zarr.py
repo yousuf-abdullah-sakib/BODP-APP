@@ -51,6 +51,34 @@ def _make_gridded_netcdf_bytes(tmp_path) -> bytes:
     return p.read_bytes()
 
 
+def _make_two_variable_gridded_netcdf_bytes(tmp_path) -> bytes:
+    """Same 3x3x3 grid shape as _make_gridded_netcdf_bytes, but with TWO
+    distinct data variables — needed to prove a parameter-scoped NetCDF
+    extraction includes only the requested variable and genuinely excludes
+    the other, not just "produces non-empty output" (Data Page Filter &
+    Extraction Audit, critical #2)."""
+    p = tmp_path / "extract_phase5_grid_2var.nc"
+    times = pd.date_range("2024-03-01", periods=3, freq="D")
+    lats = np.array([20.0, 20.5, 21.0])
+    lons = np.array([90.0, 90.5, 91.0])
+    sst = np.zeros((3, 3, 3))
+    salinity = np.zeros((3, 3, 3))
+    for t in range(3):
+        for i in range(3):
+            for j in range(3):
+                sst[t, i, j] = 100 * t + 10 * i + j
+                salinity[t, i, j] = 35.0 + 0.1 * (100 * t + 10 * i + j)
+    ds = xr.Dataset(
+        {
+            "sea_surface_temp": (("time", "lat", "lon"), sst),
+            "salinity": (("time", "lat", "lon"), salinity),
+        },
+        coords={"time": times, "lat": lats, "lon": lons},
+    )
+    ds.to_netcdf(p)
+    return p.read_bytes()
+
+
 async def _admin_headers(client) -> dict:
     token = await register_verified_user(
         client, email="extract5-admin@example.com", admin=True,
@@ -64,7 +92,7 @@ async def _researcher(client, email: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-async def _gridded_dataset(client, admin_headers, tmp_path, *, code: str) -> str:
+async def _gridded_dataset(client, admin_headers, tmp_path, *, code: str, file_bytes: bytes | None = None) -> str:
     async with AsyncSessionLocal() as db:
         category = DatasetCategory(name=f"Cat-{code}", description="test", color_tag="cat-Environmental")
         db.add(category)
@@ -82,7 +110,7 @@ async def _gridded_dataset(client, admin_headers, tmp_path, *, code: str) -> str
         await db.refresh(dataset)
         dataset_id = str(dataset.id)
 
-    files = {"file": (f"{code}.nc", _make_gridded_netcdf_bytes(tmp_path), "application/x-netcdf")}
+    files = {"file": (f"{code}.nc", file_bytes or _make_gridded_netcdf_bytes(tmp_path), "application/x-netcdf")}
     r = await client.post(
         f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
     )
@@ -226,6 +254,117 @@ class TestZarrBackedExtraction:
         r2 = await client.get(f"/api/v1/me/extractions/{extraction_id}", headers=researcher_headers)
         assert r2.json()["status"] == "complete", r2.text
         assert r2.json()["output_size_bytes"] > 0
+
+
+class TestNetcdfParameterFiltering:
+    """Data Page Filter & Extraction Audit, critical #2: NetcdfExtractor
+    read scope.get("parameter") (singular) instead of scope["parameters"]
+    (plural, the field SearchCriteriaSchema/requested_scope actually use)
+    — the singular key never exists in any real stored scope, so this was
+    a permanent no-op that silently included every variable regardless of
+    the user's selection. Uses a genuinely two-variable fixture so
+    "parameter filtering worked" means "the OTHER variable is actually
+    gone," not just "the file isn't empty.\""""
+
+    async def test_netcdf_extraction_includes_only_requested_parameter(self, client, tmp_path):
+        admin_headers = await _admin_headers(client)
+        email = "extract5-researcher-netcdf-param@example.com"
+        researcher_headers = await _researcher(client, email)
+        dataset_id = await _gridded_dataset(
+            client, admin_headers, tmp_path, code="BD-EXT5-NCPARAM",
+            file_bytes=_make_two_variable_gridded_netcdf_bytes(tmp_path),
+        )
+        grant_id = await _approved_grant(client, admin_headers, email, dataset_id=dataset_id)
+
+        r = await client.post(
+            f"/api/v1/me/grants/{grant_id}/extract",
+            json={"scope": {"parameters": ["sea_surface_temp"]}, "format": "netcdf"},
+            headers=researcher_headers,
+        )
+        assert r.status_code in (200, 202), r.text
+        extraction_id = r.json()["id"]
+
+        r2 = await client.get(f"/api/v1/me/extractions/{extraction_id}", headers=researcher_headers)
+        assert r2.json()["status"] == "complete", r2.text
+
+        content = await _fetch_extraction_output_bytes(extraction_id)
+        with xr.open_dataset(io.BytesIO(content)) as ds:
+            assert "sea_surface_temp" in ds.data_vars
+            assert "salinity" not in ds.data_vars, (
+                "requested only sea_surface_temp but salinity is still present — "
+                "parameter filtering silently did nothing"
+            )
+
+    async def test_netcdf_extraction_with_no_parameter_scope_includes_all_variables(self, client, tmp_path):
+        """Control case: an empty/omitted parameters scope must still
+        include every variable (matches apply_scope_mask's "empty list ==
+        no filtering" convention) — the fix must not accidentally start
+        excluding everything when nothing was requested."""
+        admin_headers = await _admin_headers(client)
+        email = "extract5-researcher-netcdf-noparam@example.com"
+        researcher_headers = await _researcher(client, email)
+        dataset_id = await _gridded_dataset(
+            client, admin_headers, tmp_path, code="BD-EXT5-NCNOPARAM",
+            file_bytes=_make_two_variable_gridded_netcdf_bytes(tmp_path),
+        )
+        grant_id = await _approved_grant(client, admin_headers, email, dataset_id=dataset_id)
+
+        r = await client.post(
+            f"/api/v1/me/grants/{grant_id}/extract",
+            json={"scope": {}, "format": "netcdf"},
+            headers=researcher_headers,
+        )
+        assert r.status_code in (200, 202), r.text
+        extraction_id = r.json()["id"]
+
+        r2 = await client.get(f"/api/v1/me/extractions/{extraction_id}", headers=researcher_headers)
+        assert r2.json()["status"] == "complete", r2.text
+
+        content = await _fetch_extraction_output_bytes(extraction_id)
+        with xr.open_dataset(io.BytesIO(content)) as ds:
+            assert "sea_surface_temp" in ds.data_vars
+            assert "salinity" in ds.data_vars
+
+
+class TestZarrExtractionSpatialBounds:
+    """Data Page Filter & Extraction Audit, critical #1's downstream half:
+    the request-payload fix (frontend) ensures typed lat/lon reaches
+    stored search_criteria/requested_scope as a `bounds` dict — this
+    verifies that once `bounds` IS present in the stored scope (exactly
+    the shape the fixed frontend now produces for typed-coordinate
+    requests, indistinguishable on the backend from a drawn AOI), a Zarr-
+    backed extraction genuinely narrows to it, for both a spatial subset
+    that should keep some cells and one that should exclude the rest."""
+
+    async def test_extraction_narrows_to_requested_bounds(self, client, tmp_path):
+        admin_headers = await _admin_headers(client)
+        email = "extract5-researcher-bounds@example.com"
+        researcher_headers = await _researcher(client, email)
+        dataset_id = await _gridded_dataset(client, admin_headers, tmp_path, code="BD-EXT5-BOUNDS")
+        grant_id = await _approved_grant(client, admin_headers, email, dataset_id=dataset_id)
+
+        # Fixture grid is lat in {20.0, 20.5, 21.0}, lon in {90.0, 90.5, 91.0}
+        # (see _make_gridded_netcdf_bytes) — narrow to exactly the single
+        # (lat=20.0, lon=90.0) cell across all 3 timesteps.
+        r = await client.post(
+            f"/api/v1/me/grants/{grant_id}/extract",
+            json={
+                "scope": {"bounds": {"lat_min": 19.9, "lat_max": 20.1, "lon_min": 89.9, "lon_max": 90.1}},
+                "format": "csv",
+            },
+            headers=researcher_headers,
+        )
+        assert r.status_code in (200, 202), r.text
+        extraction_id = r.json()["id"]
+
+        r2 = await client.get(f"/api/v1/me/extractions/{extraction_id}", headers=researcher_headers)
+        assert r2.json()["status"] == "complete", r2.text
+
+        content = await _fetch_extraction_output_bytes(extraction_id)
+        df = pd.read_csv(io.BytesIO(content))
+        assert len(df) == 3  # 1 cell x 3 timesteps
+        assert set(df["lat"].round(1)) == {20.0}
+        assert set(df["lon"].round(1)) == {90.0}
 
 
 class TestMixedStorageKindExtraction:

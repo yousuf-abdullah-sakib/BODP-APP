@@ -3,7 +3,13 @@
 import { useEffect, useState } from "react";
 import { useToast } from "@/context/ToastContext";
 import StatusBadge from "@/components/ui/StatusBadge";
-import { approveRequest, getAdminRequests, rejectRequest } from "@/lib/api/admin-requests";
+import { ApiError } from "@/lib/api/client";
+import {
+  approveRequest,
+  getAdminRequests,
+  getSupportingDocumentDownloadUrl,
+  rejectRequest,
+} from "@/lib/api/admin-requests";
 import RejectRequestModal from "./RejectRequestModal";
 import GrantDurationModal from "./GrantDurationModal";
 import type { GrantDuration, RequestDetail, SearchCriteria } from "@/lib/types/requests";
@@ -99,6 +105,7 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [downloadingDocId, setDownloadingDocId] = useState<string | null>(null);
   const [rejectTarget, setRejectTarget] = useState<RequestDetail | null>(null);
   const [durationTarget, setDurationTarget] = useState<{
     request: RequestDetail;
@@ -135,6 +142,18 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
       onMutate?.();
     } catch {
       toast("Failed to approve request.", "error");
+    }
+  }
+
+  async function handleDownloadDocument(r: RequestDetail) {
+    setDownloadingDocId(r.id);
+    try {
+      const { download_url } = await getSupportingDocumentDownloadUrl(r.id);
+      window.open(download_url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      toast(err instanceof ApiError ? err.message : "Failed to download supporting document.", "error");
+    } finally {
+      setDownloadingDocId(null);
     }
   }
 
@@ -216,6 +235,21 @@ export default function AdminRequestsSection({ onMutate }: { onMutate?: () => vo
 
                 <div className="mini-label">Research Justification</div>
                 <div className="req-letter-box" style={{ marginBottom: "1rem" }}>{r.justification}</div>
+
+                {r.supporting_document && (
+                  <div style={{ marginBottom: "1rem" }}>
+                    <div className="mini-label">Supporting Document</div>
+                    <button
+                      className="chip"
+                      style={{ cursor: "pointer", border: "none" }}
+                      onClick={() => handleDownloadDocument(r)}
+                      disabled={downloadingDocId === r.id}
+                    >
+                      📎 {r.supporting_document.original_filename}
+                      {downloadingDocId === r.id ? " · Opening…" : " · View/Download"}
+                    </button>
+                  </div>
+                )}
 
                 <RequestFilterConfig request={r} />
 

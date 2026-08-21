@@ -1,12 +1,18 @@
 import { apiFetch } from "./client";
 import type {
+  ComparisonJobResponse,
+  ComparisonJobStatus,
   ComparisonRequest,
-  ComparisonResponse,
+  CoverageRequest,
+  CoverageResponse,
+  ProfilesRequest,
+  ProfilesResponse,
   SpatialJobStatusResponse,
   SpatialRequest,
   SpatialResponse,
+  StatisticsJobResponse,
+  StatisticsJobStatus,
   StatisticsRequest,
-  StatisticsResponse,
   TimeSeriesRequest,
   TimeSeriesResponse,
   VisualizableDatasetSummary,
@@ -18,8 +24,11 @@ export async function getVisualizableDatasets(): Promise<VisualizableDatasetSumm
   return apiFetch<VisualizableDatasetSummary[]>("/visualize/datasets");
 }
 
-export async function postTimeseries(body: TimeSeriesRequest): Promise<TimeSeriesResponse> {
-  return apiFetch<TimeSeriesResponse>("/visualize/timeseries", { method: "POST", body });
+export async function postTimeseries(
+  body: TimeSeriesRequest,
+  options?: { signal?: AbortSignal }
+): Promise<TimeSeriesResponse> {
+  return apiFetch<TimeSeriesResponse>("/visualize/timeseries", { method: "POST", body, ...options });
 }
 
 export async function postSpatial(body: SpatialRequest): Promise<SpatialResponse> {
@@ -30,14 +39,39 @@ export async function getSpatialJob(jobId: string): Promise<SpatialJobStatusResp
   return apiFetch<SpatialJobStatusResponse>(`/visualize/spatial/${jobId}`);
 }
 
-export async function postComparison(body: ComparisonRequest): Promise<ComparisonResponse> {
-  return apiFetch<ComparisonResponse>("/visualize/comparison", { method: "POST", body });
+export async function postComparison(
+  body: ComparisonRequest,
+  options?: { signal?: AbortSignal }
+): Promise<ComparisonJobResponse> {
+  return apiFetch<ComparisonJobResponse>("/visualize/comparison", { method: "POST", body, ...options });
 }
 
-export async function postStatistics(body: StatisticsRequest): Promise<StatisticsResponse> {
-  return apiFetch<StatisticsResponse>("/visualize/statistics", { method: "POST", body });
+export async function getComparisonJob(jobId: string): Promise<ComparisonJobStatus> {
+  return apiFetch<ComparisonJobStatus>(`/visualize/comparison/${jobId}`);
+}
+
+export async function postStatistics(
+  body: StatisticsRequest,
+  options?: { signal?: AbortSignal }
+): Promise<StatisticsJobResponse> {
+  return apiFetch<StatisticsJobResponse>("/visualize/statistics", { method: "POST", body, ...options });
+}
+
+export async function getStatisticsJob(jobId: string): Promise<StatisticsJobStatus> {
+  return apiFetch<StatisticsJobStatus>(`/visualize/statistics/${jobId}`);
+}
+
+export async function postProfiles(
+  body: ProfilesRequest,
+  options?: { signal?: AbortSignal }
+): Promise<ProfilesResponse> {
+  return apiFetch<ProfilesResponse>("/visualize/profiles", { method: "POST", body, ...options });
 }
 
 export async function postFilteredStations(body: VizFilterParams): Promise<StationOption[]> {
   return apiFetch<StationOption[]>("/visualize/stations", { method: "POST", body });
+}
+
+export async function postCoverage(body: CoverageRequest): Promise<CoverageResponse> {
+  return apiFetch<CoverageResponse>("/visualize/coverage", { method: "POST", body });
 }

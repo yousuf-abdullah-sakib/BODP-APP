@@ -345,6 +345,20 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
             )
             db.commit()
 
+        # Dataset Default-View Snapshot feature: fire-and-forget, dispatched
+        # unconditionally on any successful ingestion (not nested inside
+        # `if upload:` above — bulk-import-sourced ingestion has no Upload
+        # row at all, see _run_ingestion's `upload: Upload | None = None`,
+        # and must still get a fresh snapshot). Dispatched AFTER every
+        # commit above so a slow/failed snapshot build can never delay or
+        # block this dataset being marked ready. Regenerates the whole
+        # dataset's snapshot (not just this file's contribution) since a
+        # dataset can have multiple DatasetFile rows and the snapshot must
+        # merge across all of them, same as the live query path does.
+        from app.worker.tasks.snapshots import generate_dataset_snapshot
+
+        generate_dataset_snapshot.delay(str(dataset_file.dataset_id))
+
         return {"status": "complete", **result}
 
 
@@ -883,6 +897,7 @@ def _write_dataset_records(
     lat_col = metadata.extra.get("lat_col")
     lon_col = metadata.extra.get("lon_col")
     time_col = metadata.extra.get("time_col")
+    depth_col = metadata.extra.get("depth_col")
     if not (time_col or (lat_col and lon_col)):
         logger.info(
             "ingestion.dataset_records_skipped_no_dimensions",
@@ -893,7 +908,7 @@ def _write_dataset_records(
 
     parquet_file = pq.ParquetFile(artifact.local_path)
     all_columns = set(parquet_file.schema_arrow.names)
-    coord_cols = {c for c in (lat_col, lon_col, time_col) if c}
+    coord_cols = {c for c in (lat_col, lon_col, time_col, depth_col) if c}
 
     # metadata.variables is each parser's own authoritative list of real
     # data variables (NetCDF: ds.data_vars.keys(); CSV: every column that
@@ -925,7 +940,7 @@ def _write_dataset_records(
     rows_seen = 0
     written = 0
 
-    copy_columns = "id, dataset_id, dataset_file_id, time, lat, lon, parameter, value, quality_flag, format, geom"
+    copy_columns = "id, dataset_id, dataset_file_id, time, lat, lon, depth_m, parameter, value, quality_flag, format, geom"
     copy_sql = f"COPY dataset_records ({copy_columns}) FROM STDIN"
 
     copy_conn = psycopg.connect(_raw_sync_dsn())
@@ -965,6 +980,9 @@ def _write_dataset_records(
 
                 row_time = _resolve_row_time(table[time_col][i]) if time_col else None
 
+                depth_value = table[depth_col][i] if depth_col else None
+                depth_m = float(depth_value) if _is_finite_number(depth_value) else None
+
                 if row_time is None and not has_latlon:
                     # Neither dimension resolved for this row (e.g. a
                     # null/unparseable cell in an otherwise-present
@@ -985,6 +1003,7 @@ def _write_dataset_records(
                             row_time,
                             lat,
                             lon,
+                            depth_m,
                             col,
                             float(value),
                             _DEFAULT_QUALITY_FLAG,
@@ -1088,6 +1107,7 @@ def _write_variable_registry(
     lat_col = metadata.extra.get("lat_col")
     lon_col = metadata.extra.get("lon_col")
     time_col = metadata.extra.get("time_col")
+    depth_col = metadata.extra.get("depth_col")
 
     if metadata.shape == DataShape.RASTER:
         for band_name in metadata.bands:
@@ -1102,8 +1122,18 @@ def _write_variable_registry(
         db.flush()
         return written
 
-    # Tabular: register the detected coordinate/dimension columns first...
-    for col, dtype in ((lat_col, VariableDataType.NUMERIC), (lon_col, VariableDataType.NUMERIC), (time_col, VariableDataType.TEMPORAL)):
+    # Tabular: register the detected coordinate/dimension columns first —
+    # depth is registered as is_dimension=True exactly like lat/lon/time,
+    # the same convention the Oceanographic Profiles module's dimension
+    # detection (visualize_service.dataset_has_depth_dimension) relies on;
+    # no new VariableRole was added for this since is_dimension + name
+    # matching is sufficient without a schema migration.
+    for col, dtype in (
+        (lat_col, VariableDataType.NUMERIC),
+        (lon_col, VariableDataType.NUMERIC),
+        (time_col, VariableDataType.TEMPORAL),
+        (depth_col, VariableDataType.NUMERIC),
+    ):
         if not col:
             continue
         _upsert_dataset_variable(
@@ -1125,7 +1155,7 @@ def _write_variable_registry(
     # metadata.variables instead, same as the raster band path above:
     # existence is recorded, numeric range is not (would require reading
     # chunk data, out of scope for this lightweight write).
-    coord_cols = {c for c in (lat_col, lon_col, time_col) if c}
+    coord_cols = {c for c in (lat_col, lon_col, time_col, depth_col) if c}
     if artifact is not None and artifact.is_zarr:
         for var_name in metadata.variables:
             if var_name in coord_cols:

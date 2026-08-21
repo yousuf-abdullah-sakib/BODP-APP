@@ -1,4 +1,4 @@
-export type ColorRampName = "Viridis" | "Plasma" | "RdBu" | "YlOrRd" | "Blues";
+export type ColorRampName = "Viridis" | "Plasma" | "RdBu" | "YlOrRd" | "Blues" | "GreenYellowRed";
 
 const RAMPS: Record<ColorRampName, [number, number, number][]> = {
   Viridis: [
@@ -35,6 +35,18 @@ const RAMPS: Record<ColorRampName, [number, number, number][]> = {
     [107, 174, 214],
     [33, 113, 181],
     [8, 48, 107],
+  ],
+  // Visualization Module audit (Interpolation Color Ramp): low-to-high
+  // sequential heat progression, requested explicitly — green (low) ->
+  // yellow -> orange -> dark red (high). Distinct from YlOrRd (which
+  // starts at pale yellow, never includes green, and tops out at plain
+  // red) — this ramp adds the green low end and a darker red ceiling.
+  GreenYellowRed: [
+    [26, 152, 80],
+    [166, 217, 106],
+    [255, 255, 191],
+    [253, 174, 97],
+    [165, 0, 38],
   ],
 };
 

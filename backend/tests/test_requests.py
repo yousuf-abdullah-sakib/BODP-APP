@@ -114,6 +114,66 @@ class TestSubmitRequest:
         assert r.status_code == 201, r.text
         assert r.json()["search_criteria"]["category"] == "Environmental"
 
+    async def test_submit_with_spatial_bounds_narrows_matching_count(self, client):
+        """Data Page Filter & Extraction Audit, critical #1: the stored
+        matching_record_count snapshot shown to the admin reviewer
+        (AdminRequestsSection.tsx) must reflect the SAME spatial extent as
+        search_criteria.bounds — this is the field the frontend fix now
+        populates from either a drawn AOI or typed Latitude/Longitude Min/
+        Max, so it must genuinely narrow the snapshot here, not just be
+        accepted and ignored."""
+        import json
+
+        dataset_id = await _seed_published_dataset(code="BD-REQ-BOUNDS")
+        async with AsyncSessionLocal() as db:
+            from app.models.catalog import DatasetRecord
+
+            # 3 records inside the requested bounds, 2 clearly outside it.
+            for lat, lon in [(21.5, 90.0), (21.6, 90.1), (21.7, 90.2)]:
+                db.add(
+                    DatasetRecord(
+                        dataset_id=uuid.UUID(dataset_id), time=datetime(2024, 1, 15).date(),
+                        lat=lat, lon=lon, parameter="sea_surface_temp", value=27.0,
+                        geom=f"SRID=4326;POINT({lon} {lat})",
+                    )
+                )
+            for lat, lon in [(10.0, 80.0), (5.0, 75.0)]:
+                db.add(
+                    DatasetRecord(
+                        dataset_id=uuid.UUID(dataset_id), time=datetime(2024, 1, 15).date(),
+                        lat=lat, lon=lon, parameter="sea_surface_temp", value=26.0,
+                        geom=f"SRID=4326;POINT({lon} {lat})",
+                    )
+                )
+            await db.commit()
+
+        headers = await _researcher_headers(client, email="bounds-researcher@example.com")
+        criteria = json.dumps({"bounds": {"lat_min": 21.0, "lat_max": 22.0, "lon_min": 89.5, "lon_max": 90.5}})
+        r = await _submit_request(client, headers, dataset_id, search_criteria=criteria)
+        assert r.status_code == 201, r.text
+        request_id = r.json()["id"]
+        assert r.json()["search_criteria"]["bounds"] == {
+            "lat_min": 21.0, "lat_max": 22.0, "lon_min": 89.5, "lon_max": 90.5,
+        }
+
+        # Admin review must see the SAME narrowed count, not the full 5.
+        admin_headers = await _admin_headers_with_approve_permission(client)
+        list_r = await client.get("/api/v1/admin/requests", headers=admin_headers)
+        listed = next(req for req in list_r.json() if req["id"] == request_id)
+        assert listed["matching_record_count"] == 3
+        assert listed["dataset_total_record_count"] == 5
+
+        # Approval must carry the exact same bounds into the grant's scope.
+        approve_r = await client.post(
+            f"/api/v1/admin/requests/{request_id}/approve",
+            json={"duration": "1y"},
+            headers=admin_headers,
+        )
+        assert approve_r.status_code == 200, approve_r.text
+        assert approve_r.json()["scope"]["bounds"] == {
+            "lat_min": 21.0, "lat_max": 22.0, "lon_min": 89.5, "lon_max": 90.5,
+        }
+
     async def test_submit_notifies_approving_admin_exactly_once(self, client, monkeypatch):
         # Regression test: request submission used to notify admins via TWO
         # independent paths — a synchronous notify_admins() call selecting

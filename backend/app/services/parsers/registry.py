@@ -73,6 +73,37 @@ def sniff_format(path: Path, declared_extension: str) -> str:
         raise ParserError("File extension is .mat but content is not a recognized MATLAB format")
     if ext == "csv" and (is_hdf5 or is_classic_netcdf or is_tiff):
         raise ParserError("File extension is .csv but content looks like a binary format")
+    if ext == "csv":
+        # CSV is the only text-based format in this registry — unlike the
+        # NetCDF/mat/TIFF checks above (which match against a specific
+        # known-good signature), a mismatched CSV upload isn't limited to
+        # a handful of other scientific formats we recognize. A renamed
+        # arbitrary binary (e.g. a PE/ELF executable) has no signature in
+        # the checks above and would otherwise reach the parser itself
+        # before being rejected (Phase 10 security audit finding: the
+        # parser DOES still reject it — pd.read_csv fails to UTF-8-decode
+        # binary bytes — so this was never an ingestion bypass, just a
+        # later, more expensive rejection point than intended). Restores
+        # the "reject before any parser attempts real work" intent this
+        # function's own docstring states, without hardcoding a
+        # magic-byte blocklist for every possible non-CSV binary format.
+        #
+        # Two checks, not one: valid-UTF-8-decodability alone isn't
+        # enough — control-character bytes (e.g. ELF's leading \x7f, or
+        # embedded \x00 NUL bytes) are technically valid single-byte UTF-8
+        # codepoints and would pass a decode-only check while still being
+        # clearly not real CSV text (confirmed by testing a genuine ELF
+        # header against an earlier, decode-only version of this check —
+        # it passed incorrectly). A NUL byte in particular can never
+        # legitimately appear in a text CSV.
+        try:
+            decoded = header.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ParserError(
+                "File extension is .csv but content is not valid text"
+            ) from exc
+        if "\x00" in decoded:
+            raise ParserError("File extension is .csv but content is not valid text")
     if ext in ("tif", "tiff", "geotiff") and not is_tiff:
         raise ParserError(f"File extension is .{ext} but content is not a recognized TIFF format")
 

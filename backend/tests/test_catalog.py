@@ -334,6 +334,122 @@ class TestCatalogDetail:
         assert r.json() == []
 
 
+class TestDatasetTemporalExtent:
+    """catalog_service.get_dataset_temporal_extent -- Dataset.temporal_
+    start/temporal_end (the dataset-level fields) are only ever set by
+    the demo-seeding script, never by real ingestion, so this must
+    aggregate DatasetFile.temporal_start/temporal_end (reliably set by
+    ingestion) with a DatasetRecord.time fallback for pre-Phase-2
+    legacy datasets that predate that field existing at all."""
+
+    async def test_extent_from_dataset_file(self):
+        from app.services.catalog_service import get_dataset_temporal_extent
+        from app.models.catalog import Dataset, DatasetCategory, DatasetFile, DatasetStatus
+
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Extent Test", description="test", color_tag="cat-extent")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-EXTENT-FILE", title="Extent From File", category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value, record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+            db.add(
+                DatasetFile(
+                    dataset_id=dataset.id, file_name="a.csv", storage_backend="vps_minio",
+                    storage_bucket="b", storage_key="k", storage_kind="parquet",
+                    temporal_start=date(2023, 3, 1), temporal_end=date(2023, 6, 30),
+                )
+            )
+            await db.commit()
+            dataset_id = dataset.id
+
+        async with AsyncSessionLocal() as db:
+            from app.services.catalog_service import get_dataset_temporal_extent as get_extent
+
+            start, end = await get_extent(db, dataset_id)
+            assert start == date(2023, 3, 1)
+            assert end == date(2023, 6, 30)
+
+    async def test_extent_falls_back_to_dataset_record_when_file_extent_missing(self):
+        from app.services.catalog_service import get_dataset_temporal_extent
+        from app.models.catalog import Dataset, DatasetCategory, DatasetFile, DatasetRecord, DatasetStatus
+
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Extent Fallback Test", description="test", color_tag="cat-extent2")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-EXTENT-FALLBACK", title="Extent Fallback", category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value, record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+            # A DatasetFile with NO temporal_start/end (as if ingested
+            # before that field existed) -- the primary aggregate must
+            # find nothing here, forcing the fallback.
+            db.add(
+                DatasetFile(
+                    dataset_id=dataset.id, file_name="legacy.csv", storage_backend="vps_minio",
+                    storage_bucket="b", storage_key="k", storage_kind=None,
+                )
+            )
+            for i, d in enumerate([date(2021, 5, 10), date(2021, 5, 15), date(2021, 6, 1)]):
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id, time=d, lat=21.0, lon=90.0,
+                        parameter="Test Param", value=float(i), unit="unit", quality_flag="normal",
+                        geom="SRID=4326;POINT(90.0 21.0)",
+                    )
+                )
+            await db.commit()
+            dataset_id = dataset.id
+
+        async with AsyncSessionLocal() as db:
+            start, end = await get_dataset_temporal_extent(db, dataset_id)
+            assert start == date(2021, 5, 10)
+            assert end == date(2021, 6, 1)
+
+    async def test_extent_is_none_for_dataset_with_no_time_dimension(self):
+        from app.services.catalog_service import get_dataset_temporal_extent
+        from app.models.catalog import Dataset, DatasetCategory, DatasetFile, DatasetRecord, DatasetStatus
+
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="No Time Test", description="test", color_tag="cat-notime")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-NO-TIME", title="No Time Dimension", category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value, record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+            db.add(
+                DatasetFile(
+                    dataset_id=dataset.id, file_name="scattered.csv", storage_backend="vps_minio",
+                    storage_bucket="b", storage_key="k", storage_kind="parquet",
+                )
+            )
+            # A real record with time=NULL -- genuinely no temporal data,
+            # not just an empty dataset.
+            db.add(
+                DatasetRecord(
+                    dataset_id=dataset.id, time=None, lat=21.0, lon=90.0,
+                    parameter="Test Param", value=1.0, unit="unit", quality_flag="normal",
+                    geom="SRID=4326;POINT(90.0 21.0)",
+                )
+            )
+            await db.commit()
+            dataset_id = dataset.id
+
+        async with AsyncSessionLocal() as db:
+            start, end = await get_dataset_temporal_extent(db, dataset_id)
+            assert start is None
+            assert end is None
+
+
 class TestCatalogRecords:
     async def test_records_no_filter_returns_all_matching(self, client):
         seed = await _seed_minimal_catalog()
@@ -343,6 +459,40 @@ class TestCatalogRecords:
         assert body["matching_count"] == 10
         assert body["dataset_total_count"] == 10
         assert len(body["preview"]) == 6  # capped preview
+
+    async def test_identical_records_request_is_cached(self, client):
+        """Regression for the Performance & Behavior investigation, Phase
+        5: /catalog/{id}/records had no caching at all, unlike the
+        Visualize endpoints (all cached since this same investigation's
+        Phase 3). Same proof pattern already used for /visualize/*'s own
+        caching tests: mutate underlying data after the first call, and
+        confirm the second identical request still returns the stale
+        (pre-mutation) count -- proving the cache path was actually hit."""
+        seed = await _seed_minimal_catalog()
+        r1 = await client.get(f"/api/v1/catalog/{seed['published_id']}/records")
+        assert r1.status_code == 200
+        first = r1.json()
+        assert first["matching_count"] == 10
+
+        async with AsyncSessionLocal() as db:
+            db.add(
+                DatasetRecord(
+                    dataset_id=seed["published_id"],
+                    time=date(2024, 3, 1),
+                    lat=21.0,
+                    lon=90.0,
+                    parameter="Sea Surface Temp",
+                    value=99.0,
+                    unit="°C",
+                    quality_flag="normal",
+                    geom="SRID=4326;POINT(90.0 21.0)",
+                )
+            )
+            await db.commit()
+
+        r2 = await client.get(f"/api/v1/catalog/{seed['published_id']}/records")
+        assert r2.status_code == 200
+        assert r2.json()["matching_count"] == first["matching_count"]
 
     async def test_records_quality_breakdown_is_exact(self, client):
         seed = await _seed_minimal_catalog()

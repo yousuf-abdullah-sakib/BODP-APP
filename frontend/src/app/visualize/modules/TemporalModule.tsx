@@ -73,21 +73,22 @@ export default function TemporalModule({
   const anomalyControls = useChartControls({ grid: true, resetView: true });
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
-    postTimeseries({ parameter: filters.parameter, ...toVizFilterParams(filters) })
+    postTimeseries({ parameter: filters.parameter, ...toVizFilterParams(filters) }, { signal: controller.signal })
       .then((res) => {
-        if (!cancelled) setData(res);
+        setData(res);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Failed to load time series data.");
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : "Failed to load time series data.");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [filters]);
 
@@ -104,6 +105,14 @@ export default function TemporalModule({
       <div className="empty-state">
         <div className="es-icon">⏳</div>
         <p>Loading time series…</p>
+      </div>
+    );
+  }
+  if (!data.has_temporal_data) {
+    return (
+      <div className="empty-state">
+        <div className="es-icon">🕐</div>
+        <p>This dataset has no time dimension — temporal analysis doesn&apos;t apply.</p>
       </div>
     );
   }

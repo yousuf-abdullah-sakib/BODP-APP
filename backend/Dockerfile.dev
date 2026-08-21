@@ -7,6 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # See Dockerfile (prod) for why libexpat1/libgdal-dev/libgeos-c1v5/libproj-dev
 # are needed — rasterio's bundled GDAL requires them at runtime, not just build time.
+# postgresql-client: pg_dump/pg_restore for Phase 10.3's real backup task
+# (worker/tasks/backups.py, celery-worker runs this Dockerfile) — the
+# base image's default repo candidate matches the postgis/postgis:17-3.5
+# server major version exactly (confirmed via apt-cache policy), so no
+# pinned third-party apt repo is needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gcc \
@@ -15,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgeos-c1v5 \
     libproj-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

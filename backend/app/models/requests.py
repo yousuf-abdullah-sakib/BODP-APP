@@ -34,6 +34,33 @@ class ExtractionStatus(StrEnum):
     FAILED = "failed"
 
 
+class RequestSupportingDocument(UUIDPKMixin, TimestampMixin, Base):
+    """A user-supplied attachment (PDF/DOC/DOCX) justifying a DatasetRequest.
+
+    Deliberately separate from DatasetFile (the scientific-data table):
+    this table has none of DatasetFile's dataset_id/storage_kind/
+    spatial_extent/temporal fields, only what an uploaded attachment
+    actually needs.
+    """
+
+    __tablename__ = "request_supporting_documents"
+
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("dataset_requests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    storage_backend: Mapped[str] = mapped_column(String(20), nullable=False)
+    storage_bucket: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    request: Mapped["DatasetRequest"] = relationship(foreign_keys="RequestSupportingDocument.request_id")
+
+
 class DatasetRequest(UUIDPKMixin, Base):
     __tablename__ = "dataset_requests"
 
@@ -60,8 +87,24 @@ class DatasetRequest(UUIDPKMixin, Base):
     # in which case the original search_criteria becomes the grant's scope
     # unchanged, exactly as before this field existed.
     admin_modified_search_criteria: Mapped[dict | None] = mapped_column(JSONB)
-    supporting_document_file_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("dataset_files.id", ondelete="SET NULL")
+    # Supporting Document feature: FK originally targeted dataset_files.id
+    # (the scientific-data table) before this column was ever actually
+    # written to by any code path — confirmed via full-codebase trace
+    # that it stayed permanently NULL (see the "Supporting Document
+    # Missing from Admin Review" investigation). Repointed to the new,
+    # correctly-shaped RequestSupportingDocument table below rather than
+    # reusing DatasetFile, which requires dataset_id/storage_kind/
+    # spatial_extent/temporal_start-end — none of which describe a user's
+    # PDF attachment. The one-nullable-FK RELATIONSHIP concept on
+    # DatasetRequest is preserved; only its target table changed.
+    supporting_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "request_supporting_documents.id",
+            ondelete="SET NULL",
+            use_alter=True,
+            name="dataset_requests_supporting_document_id_fkey",
+        ),
     )
     # Coverage snapshot — computed ONCE via catalog_service.
     # get_matching_record_counts at request-creation time (requests_
@@ -97,6 +140,9 @@ class DatasetRequest(UUIDPKMixin, Base):
     dataset: Mapped["Dataset"] = relationship()
     user: Mapped["User"] = relationship(foreign_keys="DatasetRequest.user_id")
     grants: Mapped[list["AccessGrant"]] = relationship(back_populates="request")
+    supporting_document: Mapped["RequestSupportingDocument | None"] = relationship(
+        foreign_keys="DatasetRequest.supporting_document_id"
+    )
 
 
 class AccessGrant(UUIDPKMixin, Base):

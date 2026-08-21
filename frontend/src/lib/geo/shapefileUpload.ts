@@ -10,7 +10,14 @@ export async function parseShapefile(file: File): Promise<GeoJSON.FeatureCollect
   return collection;
 }
 
-function ringCoordinates(geometry: GeoJSON.Geometry): number[][][] {
+// Every ring of a Polygon/MultiPolygon geometry -- outer boundary AND
+// interior holes alike (a bounding-box or point-in-polygon computation
+// over ALL rings is correct either way: hole vertices are always inside
+// the outer ring already, and a hole is still real geometry a point-in-
+// polygon test must honor). Exported so callers needing the full,
+// unreduced ring set (e.g. an AOI's bounding box) don't reimplement
+// this Polygon/MultiPolygon coordinate-shape handling.
+export function ringCoordinates(geometry: GeoJSON.Geometry): number[][][] {
   if (geometry.type === "Polygon") return geometry.coordinates;
   if (geometry.type === "MultiPolygon") return geometry.coordinates.flat();
   return [];
@@ -26,6 +33,11 @@ function pointInRing(lat: number, lon: number, ring: number[][]): boolean {
     if (intersects) inside = !inside;
   }
   return inside;
+}
+
+/** True when the collection has at least one ring worth rendering/filtering by. */
+export function hasUsableGeometry(fc: GeoJSON.FeatureCollection): boolean {
+  return fc.features.some((f) => f.geometry && ringCoordinates(f.geometry).some((r) => r.length >= 3));
 }
 
 export function pointInFeatureCollection(lat: number, lon: number, fc: GeoJSON.FeatureCollection): boolean {

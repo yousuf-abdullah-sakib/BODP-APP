@@ -112,6 +112,23 @@ class AuthService:
         ip_address: str | None,
     ) -> User:
         normalized_email = email.strip().lower()
+
+        # Phase 10 security audit finding: this check must run BEFORE
+        # password verification, not after. The previous ordering placed
+        # it after the wrong-password branch's `raise`, making it
+        # unreachable from the exact scenario it exists to defend against
+        # — a brute-force attacker guessing passwords never got far
+        # enough to hit this check, since every wrong guess already
+        # raised 401 first. Checking lockout status up front also means
+        # a correct password can't bypass an active lockout window either
+        # (the previous ordering would have let the attacker's lucky
+        # guess straight through), which is the correct behavior for a
+        # real lockout control.
+        if await self._is_locked_out(db, normalized_email):
+            raise AuthError(
+                "Too many failed login attempts. Please try again later.", status_code=429
+            )
+
         result = await db.execute(select(User).where(User.email == normalized_email))
         user = result.scalar_one_or_none()
 
@@ -125,11 +142,6 @@ class AuthService:
 
         if user.email_verified_at is None:
             raise AuthError("Please verify your email address before logging in", status_code=403)
-
-        if await self._is_locked_out(db, normalized_email):
-            raise AuthError(
-                "Too many failed login attempts. Please try again later.", status_code=429
-            )
 
         return user
 

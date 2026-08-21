@@ -16,6 +16,11 @@ from app.services.parsers.base import (
 _LAT_ALIASES = ("lat", "latitude", "y")
 _LON_ALIASES = ("lon", "lng", "longitude", "x")
 _TIME_ALIASES = ("time", "date", "datetime", "timestamp")
+# Oceanographic Profiles module: vertical-coordinate detection, mirroring the
+# lat/lon/time alias pattern above. "z" is deliberately excluded — unlike
+# lat/lon's "x"/"y" shorthand, a bare "z" is too ambiguous outside an
+# already-gridded context to safely claim as depth.
+_DEPTH_ALIASES = ("depth", "depth_m", "depth_meters", "pressure_depth")
 
 
 def _find_column(columns: list[str], aliases: tuple[str, ...]) -> str | None:
@@ -45,6 +50,7 @@ class CsvParser(FileParser):
         lat_col = _find_column(columns, _LAT_ALIASES)
         lon_col = _find_column(columns, _LON_ALIASES)
         time_col = _find_column(columns, _TIME_ALIASES)
+        depth_col = _find_column(columns, _DEPTH_ALIASES)
 
         try:
             # Now the real pass — count rows and compute extent. Chunked to
@@ -52,6 +58,7 @@ class CsvParser(FileParser):
             row_count = 0
             lat_min = lat_max = lon_min = lon_max = None
             time_min = time_max = None
+            depth_min = depth_max = None
 
             for chunk in pd.read_csv(path, chunksize=50_000):
                 row_count += len(chunk)
@@ -74,13 +81,29 @@ class CsvParser(FileParser):
                         chunk_min, chunk_max = col.min(), col.max()
                         time_min = chunk_min if time_min is None else min(time_min, chunk_min)
                         time_max = chunk_max if time_max is None else max(time_max, chunk_max)
+
+                if depth_col and depth_col in chunk:
+                    col = pd.to_numeric(chunk[depth_col], errors="coerce").dropna()
+                    if not col.empty:
+                        depth_min = col.min() if depth_min is None else min(depth_min, col.min())
+                        depth_max = col.max() if depth_max is None else max(depth_max, col.max())
         except ParserError:
             raise
         except Exception as exc:
             raise ParserError(f"Failed to read CSV rows: {exc}") from exc
 
+        # Positive-down is the standard oceanographic depth convention
+        # (surface=0, increasing toward the seafloor). Never inferred from
+        # sign alone when values could plausibly be negative-up elevation —
+        # only flagged "assumed" so the API/frontend can be honest about it
+        # rather than silently treating every dataset's depth_col the same
+        # way regardless of what its values actually mean.
+        depth_convention = None
+        if depth_col is not None and depth_min is not None:
+            depth_convention = "assumed_positive_down" if depth_min >= 0 else "assumed_negative_up"
+
         return ParsedFileMetadata(
-            variables=[c for c in columns if c not in (lat_col, lon_col, time_col)],
+            variables=[c for c in columns if c not in (lat_col, lon_col, time_col, depth_col)],
             dimensions={"rows": row_count},
             spatial_lat_min=float(lat_min) if lat_min is not None else None,
             spatial_lat_max=float(lat_max) if lat_max is not None else None,
@@ -89,7 +112,16 @@ class CsvParser(FileParser):
             temporal_start=time_min.date() if time_min is not None else None,
             temporal_end=time_max.date() if time_max is not None else None,
             record_count=row_count,
-            extra={"columns": columns, "lat_col": lat_col, "lon_col": lon_col, "time_col": time_col},
+            extra={
+                "columns": columns,
+                "lat_col": lat_col,
+                "lon_col": lon_col,
+                "time_col": time_col,
+                "depth_col": depth_col,
+                "depth_min": float(depth_min) if depth_min is not None else None,
+                "depth_max": float(depth_max) if depth_max is not None else None,
+                "depth_convention": depth_convention,
+            },
         )
 
     def to_processed(self, path: Path, output_dir: Path) -> ProcessedArtifact:

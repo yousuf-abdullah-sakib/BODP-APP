@@ -3,6 +3,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_client_ip
 from app.core.permissions import require_permission
@@ -15,6 +16,8 @@ from app.schemas.requests import (
     RequestDetail,
 )
 from app.services import requests_service
+from app.services.storage.registry import get_storage_backend
+from app.services.supporting_document_service import get_supporting_document_for_request
 from app.worker.tasks.notifications import send_request_approved, send_request_rejected
 
 router = APIRouter(prefix="/admin", tags=["admin-requests"])
@@ -78,6 +81,36 @@ async def reject_request(
     send_request_rejected.delay(str(rejected.id))
     coverage = requests_service.read_request_coverage_snapshot(rejected)
     return _to_request_detail(rejected, coverage)
+
+
+@router.get("/requests/{request_id}/supporting-document/download")
+async def download_supporting_document(
+    request_id: uuid.UUID,
+    current_user: User = Depends(require_permission(_APPROVE_PERMISSION)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Returns a short-lived presigned URL for an admin to view/download a
+    request's supporting document — never a raw storage path/key. Mirrors
+    GET /me/extractions/{id}/download's JSON-URL pattern: the frontend
+    fetches this via its authenticated client, then navigates the browser
+    to the (self-authenticating, signed) URL directly."""
+    dataset_request = await requests_service.get_request_for_admin(db, request_id)
+    if dataset_request.supporting_document_id is None:
+        raise HTTPException(status_code=404, detail="This request has no supporting document")
+
+    document = await get_supporting_document_for_request(
+        db, request_id=request_id, document_id=dataset_request.supporting_document_id
+    )
+    if document is None:
+        raise HTTPException(status_code=404, detail="Supporting document not found")
+
+    storage = get_storage_backend(document.storage_backend)
+    download_url = storage.presign_get(
+        document.storage_bucket,
+        document.storage_key,
+        expires_in_seconds=settings.EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES * 60,
+    )
+    return {"download_url": download_url, "filename": document.original_filename}
 
 
 @router.get("/grants", response_model=list[GrantDetail])

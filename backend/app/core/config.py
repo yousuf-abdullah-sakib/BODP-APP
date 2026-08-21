@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # --- Rate limiting ---
     RATE_LIMIT_AUTH: str = "10/minute"
     RATE_LIMIT_DEFAULT: str = "120/minute"
+    # Phase 10.2 (hardening plan): stricter than RATE_LIMIT_DEFAULT for
+    # routes that write real DB rows AND dispatch a real Celery job —
+    # request submission/extraction creation, and the
+    # QUERY_CONCURRENCY_LIMIT_PER_WORKER-gated Visualize endpoints. A
+    # scripted abuse loop against these could flood the request-approval
+    # queue, spawn excess extraction jobs, or exhaust the semaphore pool
+    # faster than legitimate traffic would — catalog/browsing endpoints
+    # deliberately stay on RATE_LIMIT_DEFAULT since read-only browsing at
+    # 120/min is correctly unrestricted further.
+    RATE_LIMIT_MUTATIONS: str = "30/minute"
 
     # --- Storage (S3-compatible; provider-agnostic per Master Plan) ---
     STORAGE_VPS_ENDPOINT_URL: str = "http://localhost:9000"
@@ -125,6 +135,12 @@ class Settings(BaseSettings):
     STORAGE_UPLOAD_CONCURRENCY: int = 16
 
     MAX_UPLOAD_SIZE_MB: int = 5000
+
+    # Data Request supporting documents (PDF/DOC/DOCX justification
+    # attachments) are a small user upload, not a scientific dataset file —
+    # kept far below MAX_UPLOAD_SIZE_MB deliberately, per explicit product
+    # requirement.
+    MAX_SUPPORTING_DOCUMENT_SIZE_MB: int = 3
 
     # Legacy (pre-v7.3) MATLAB .mat files are read via scipy.io.loadmat,
     # which has no chunked/partial-read API — the whole file loads into
@@ -211,6 +227,23 @@ class Settings(BaseSettings):
     EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES: int = 60
     EXTRACTION_SYNC_THRESHOLD_MB: int = 10
 
+    # --- Backups (Master Plan §3 Phase 10 task 4) ---
+    # How long a fresh backup dump is kept before its retention sweep
+    # (run at the end of every successful nightly backup, see
+    # worker/tasks/backups.py) deletes it plus its storage object — keeps
+    # backups/ from growing unbounded on a VPS with finite disk.
+    BACKUP_RETENTION_DAYS: int = 30
+    # Deliberately shorter than EXTRACTION_DOWNLOAD_URL_EXPIRE_MINUTES —
+    # a backup dump is full production data, a strictly more sensitive
+    # artifact than any single extraction's scoped subset.
+    BACKUP_DOWNLOAD_URL_EXPIRE_MINUTES: int = 10
+    # Hard ceiling on the pg_dump subprocess itself — a hung dump
+    # (network partition to a remote DB host, disk contention) must not
+    # leave a Celery worker slot occupied indefinitely; 1 hour is
+    # generous for this project's current data scale and can be raised
+    # if a real production DB genuinely needs longer.
+    BACKUP_PG_DUMP_TIMEOUT_SECONDS: int = 3600
+
     # --- Visualization engine (Master Plan §3 Phase 7) ---
     # Spatial interpolation requests at or below point_count * resolution^2
     # work units compute synchronously in-process; larger ones dispatch to
@@ -218,6 +251,19 @@ class Settings(BaseSettings):
     # station counts (~20-30), this keeps "low"/"medium" always sync and
     # only pushes "high" with many stations to a background job.
     VIZ_SPATIAL_SYNC_THRESHOLD_CELLS: int = 40_000
+
+    # Visualize Performance plan, Phase 4: Statistics/Comparison requests
+    # that touch non-legacy (Parquet/Zarr) files above this combined
+    # file_size_bytes total dispatch to Celery instead of computing
+    # in-process — same sync/async split as VIZ_SPATIAL_SYNC_THRESHOLD_
+    # CELLS above, but sized by data volume rather than grid-cell count
+    # since Statistics/Comparison have no equivalent "resolution" knob.
+    # A request touching only legacy DatasetRecord rows (no Parquet/Zarr
+    # files) always computes synchronously regardless of this threshold —
+    # legacy SQL aggregation was never the expensive path this plan
+    # targets. One shared setting for both endpoints since they hit the
+    # same storage tiers with comparable per-byte cost.
+    VIZ_HEAVY_QUERY_SYNC_THRESHOLD_BYTES: int = 200_000_000
 
     # --- PLAN.md Phase 5 concurrency limiter (per worker process) ---
     # Caps how many DuckDB (Parquet)/xarray (Zarr) queries run
@@ -248,6 +294,26 @@ class Settings(BaseSettings):
     #                              full sweep and the honest conclusion
     #                              about what concurrency level this
     #                              configuration actually sustains.
+    #
+    # Re-benchmarked 2026-08-21 (Visualize Performance plan, Phase 6) after
+    # Phases 0-5 cut Statistics/Comparison's uncached-request cost and
+    # diverted genuinely heavy requests off the synchronous path entirely
+    # — same methodology (real 4-Gunicorn-worker container, real Postgres/
+    # MinIO, concurrency=200, 600 requests against /catalog/{id}/records
+    # on a 1.68M-row Parquet-backed dataset, larger than the original
+    # 200K-row target):
+    #   unbounded: 0/600 errors, p50=12.2s, p95=19.4s — CPU peaked ~370%
+    #              of the host's 12 cores (well under the original's
+    #              ~1100% saturation — confirms the load profile is
+    #              genuinely lighter now, not just re-measured noise).
+    #   1/worker:  2/600 errors, p50=9.8s, p95=22.2s.
+    #   2/worker:  0/600 errors, p50=9.9s, p95=17.2s — still the best or
+    #              tied-best on every metric measured.
+    #   8/worker:  0/600 errors, p50=10.1s, p95=17.4s.
+    # 2 remains the right value — left unchanged rather than raised
+    # speculatively, since it was still optimal-or-tied even under a
+    # genuinely lighter, less CPU-saturated load than the original
+    # benchmark measured.
     #
     # This does not add a queue with unlimited depth — a request that
     # can't acquire a slot waits on the semaphore itself (still holding

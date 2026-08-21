@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -11,9 +11,10 @@ import { useToast } from "@/context/ToastContext";
 import type { DatasetDetail } from "@/lib/types/catalog";
 import DatasetRequestModal from "./DatasetRequestModal";
 import { useDatasetFilters } from "./useDatasetFilters";
-import { boundsOf } from "@/lib/geo/spatialAoi";
+import { boundsOf, type SpatialAOI } from "@/lib/geo/spatialAoi";
 import { getPreferences } from "@/lib/api/me";
 import { formatCoordinate, formatDate, type CoordinateFormatPreference, type DateFormatPreference } from "@/lib/format";
+import { parseShapefile, hasUsableGeometry } from "@/lib/geo/shapefileUpload";
 
 const SpatialFilterMap = dynamic(() => import("@/components/map/SpatialFilterMap"), {
   ssr: false,
@@ -65,11 +66,56 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
     filters,
     update,
     resetFilters,
+    resetSpatialToExtent,
     activeCount,
     stationOptions,
     loading,
     schema,
+    hasTemporalData,
+    dateRangeIsAuto,
+    spatialRangeIsAuto,
   } = useDatasetFilters(dataset);
+
+  // Custom Boundary upload — same parseShapefile logic/component the
+  // Visualize page's Spatial Mapping module already uses, wired into the
+  // SAME AOI pipeline a hand-drawn shape uses: the uploaded polygon is
+  // reduced to bounds via boundsOf and written to filters.bounds exactly
+  // like SpatialFilterMap's onAoiChange already does below, so it rides
+  // the existing spatial filter (and thus coverage/visualization query)
+  // with no separate logic. uploadedBoundaryAoi is kept only so
+  // SpatialFilterMap knows to draw THIS shape specifically; it's cleared
+  // whenever the user draws something new or hits Clear, so the
+  // boundary stays active until the user changes or clears it.
+  const [customBoundaryName, setCustomBoundaryName] = useState("");
+  const [uploadedBoundaryAoi, setUploadedBoundaryAoi] = useState<SpatialAOI | null>(null);
+  const boundaryFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  async function handleCustomBoundaryUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const geo = await parseShapefile(f);
+      if (!hasUsableGeometry(geo)) {
+        toast("That file has no usable polygon boundary.", "error");
+      } else {
+        // Full parsed geometry, not a reduced single ring -- every
+        // feature/Polygon/MultiPolygon part/hole renders and filters
+        // exactly as uploaded (see SpatialAOI's "geometry" kind).
+        const nextAoi: SpatialAOI = { kind: "geometry", geojson: geo };
+        setCustomBoundaryName(f.name);
+        setUploadedBoundaryAoi(nextAoi);
+        applyAoiBounds(nextAoi);
+        toast(`Loaded boundary from ${f.name} — now applied as the active spatial filter.`, "success");
+      }
+    } catch {
+      toast("Could not read that file as a shapefile. Upload a .zip (shp+dbf+prj) bundle.", "error");
+    }
+    e.target.value = "";
+  }
+
+  function clearCustomBoundary() {
+    clearSpatial();
+  }
 
   // Schema-driven filter rendering (PLAN.md Phase 4) — schema is null for
   // any dataset an admin hasn't reviewed yet (Phase 3), which keeps every
@@ -120,14 +166,54 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
     };
   }, [user]);
 
+  // Mirrors VisualizeClient.tsx's handleAoiChange exactly: an AOI (drawn
+  // or uploaded) drives BOTH filters.bounds (the precise polygon-derived
+  // bbox the query actually uses) AND the plain Latitude/Longitude Min/
+  // Max text fields, via the same boundsOf() reduction already computed
+  // once here and reused for both — so the visible fields always show
+  // what the map/upload just set, exactly like Visualization already
+  // does, instead of only updating the query silently underneath.
+  function applyAoiBounds(aoi: SpatialAOI) {
+    const bounds = boundsOf(aoi);
+    update("bounds", bounds);
+    update("latMin", bounds.latMin.toFixed(3));
+    update("latMax", bounds.latMax.toFixed(3));
+    update("lonMin", bounds.lonMin.toFixed(3));
+    update("lonMax", bounds.lonMax.toFixed(3));
+  }
+
+  // Clearing reverts the Lat/Lon fields to the dataset's own real extent
+  // (not blank) — matching this page's own auto-fill convention for
+  // "no active user restriction" (Visualization's equivalent clearAoi()
+  // blanks the fields instead, since it has no per-dataset default to
+  // revert to).
   function clearSpatial() {
     setClearSignal((s) => s + 1);
     update("bounds", null);
+    resetSpatialToExtent();
+    setCustomBoundaryName("");
+    setUploadedBoundaryAoi(null);
+  }
+
+  // Hand-drawing a new shape abandons any active uploaded boundary --
+  // "the user changes it" -- so this (not a raw applyAoiBounds(...) call
+  // inline) is what SpatialFilterMap's onAoiChange is wired to.
+  function handleUserDrawnAoiChange(aoi: SpatialAOI | null) {
+    setCustomBoundaryName("");
+    setUploadedBoundaryAoi(null);
+    if (aoi) {
+      applyAoiBounds(aoi);
+    } else {
+      update("bounds", null);
+      resetSpatialToExtent();
+    }
   }
 
   function handleResetAll() {
     resetFilters();
     setClearSignal((s) => s + 1);
+    setCustomBoundaryName("");
+    setUploadedBoundaryAoi(null);
   }
 
   return (
@@ -186,9 +272,10 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
                   </button>
                 </div>
                 <SpatialFilterMap
-                  onAoiChange={(aoi) => update("bounds", aoi ? boundsOf(aoi) : null)}
+                  onAoiChange={handleUserDrawnAoiChange}
                   clearSignal={clearSignal}
                   stations={stationOptions}
+                  externalAoi={uploadedBoundaryAoi}
                 />
                 <div className="map-filter-info">
                   {filters.bounds ? (
@@ -204,18 +291,49 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
                 </div>
               </div>
               <div className="filter-group" style={{ marginTop: "0.8rem" }}>
-                <span className="filter-label">Latitude Range (°)</span>
+                <span className="filter-label">
+                  Latitude Range (°)
+                  {spatialRangeIsAuto && <span style={{ fontWeight: 400, color: "var(--text-muted)" }}> (full available range)</span>}
+                </span>
                 <div className="date-row">
                   <input className="filter-input" type="number" placeholder="Min" value={filters.latMin} onChange={(e) => update("latMin", e.target.value)} />
                   <input className="filter-input" type="number" placeholder="Max" value={filters.latMax} onChange={(e) => update("latMax", e.target.value)} />
                 </div>
               </div>
               <div className="filter-group">
-                <span className="filter-label">Longitude Range (°)</span>
+                <span className="filter-label">
+                  Longitude Range (°)
+                  {spatialRangeIsAuto && <span style={{ fontWeight: 400, color: "var(--text-muted)" }}> (full available range)</span>}
+                </span>
                 <div className="date-row">
                   <input className="filter-input" type="number" placeholder="Min" value={filters.lonMin} onChange={(e) => update("lonMin", e.target.value)} />
                   <input className="filter-input" type="number" placeholder="Max" value={filters.lonMax} onChange={(e) => update("lonMax", e.target.value)} />
                 </div>
+              </div>
+              <div className="filter-group">
+                <span className="filter-label">Custom Boundary</span>
+                <button
+                  className="btn-reset"
+                  style={{ width: "100%", justifyContent: "center", display: "flex", alignItems: "center", gap: "0.4rem" }}
+                  onClick={() => boundaryFileInputRef.current?.click()}
+                >
+                  📁 Upload Shapefile (.zip)
+                </button>
+                <input
+                  ref={boundaryFileInputRef}
+                  type="file"
+                  accept=".zip,.shp"
+                  style={{ display: "none" }}
+                  onChange={handleCustomBoundaryUpload}
+                />
+                {customBoundaryName && (
+                  <div className="map-filter-info" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.4rem", marginTop: "0.5rem" }}>
+                    <span>✓ {customBoundaryName} (active spatial filter)</span>
+                    <button className="btn-clear-spatial" onClick={clearCustomBoundary}>
+                      Clear
+                    </button>
+                  </div>
+                )}
               </div>
               {hasApprovedDepthDimension && (
                 <div className="filter-group">
@@ -242,13 +360,22 @@ export default function DatasetDetailClient({ dataset }: { dataset: DatasetDetai
 
           {hasApprovedTimeDimension && (
             <FilterSection title="Time Range" icon="📅">
-              <div className="filter-group">
-                <span className="filter-label">Date From – To</span>
-                <div className="date-row">
-                  <input className="filter-input" type="date" value={filters.dateFrom} onChange={(e) => update("dateFrom", e.target.value)} />
-                  <input className="filter-input" type="date" value={filters.dateTo} onChange={(e) => update("dateTo", e.target.value)} />
+              {hasTemporalData ? (
+                <div className="filter-group">
+                  <span className="filter-label">
+                    Date From – To
+                    {dateRangeIsAuto && <span style={{ fontWeight: 400, color: "var(--text-muted)" }}> (full available range)</span>}
+                  </span>
+                  <div className="date-row">
+                    <input className="filter-input" type="date" value={filters.dateFrom} onChange={(e) => update("dateFrom", e.target.value)} />
+                    <input className="filter-input" type="date" value={filters.dateTo} onChange={(e) => update("dateTo", e.target.value)} />
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <p className="filter-label" style={{ color: "var(--text-muted)", fontWeight: 400 }}>
+                  This dataset has no time dimension — a date range filter doesn&apos;t apply.
+                </p>
+              )}
             </FilterSection>
           )}
 

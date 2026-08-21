@@ -6,7 +6,7 @@ import ChartToolbar, { useChartControls } from "@/components/charts/ChartToolbar
 import { useFullscreenChart, FullscreenOverlay } from "@/components/charts/FullscreenChartWrapper";
 import type { ColorRampName } from "@/lib/geo/colorRamp";
 import { ApiError } from "@/lib/api/client";
-import { postStatistics } from "@/lib/api/visualize";
+import { getStatisticsJob, postStatistics } from "@/lib/api/visualize";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
 import type { StatisticsResponse } from "@/lib/types/visualize";
@@ -15,6 +15,11 @@ import type { Data } from "plotly.js";
 const HISTOGRAM_COLOR = "#0891b2";
 const ANOMALY_POS_COLOR = "#dc2626";
 const ANOMALY_NEG_COLOR = "#0f766e";
+
+// Heavy requests dispatch to a Celery job (Visualize Performance plan,
+// Phase 4) instead of computing in-process — same poll loop
+// SpatialMappingModule.tsx already uses for its own job dispatch.
+const POLL_INTERVAL_MS = 1500;
 
 interface StatisticsModuleProps {
   filters: VizFilters;
@@ -40,21 +45,53 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
   const [calendarRamp, setCalendarRamp] = useState<ColorRampName>("YlOrRd");
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
     setLoading(true);
     setError(null);
-    postStatistics({ parameter: filters.parameter, ...toVizFilterParams(filters) })
-      .then((res) => {
-        if (!cancelled) setData(res);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Failed to load statistics.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+
+    async function run() {
+      try {
+        const res = await postStatistics(
+          { parameter: filters.parameter, ...toVizFilterParams(filters) },
+          { signal: controller.signal }
+        );
+
+        if (res.status === "complete") {
+          if (res.result) setData(res.result);
+          setLoading(false);
+          return;
+        }
+
+        const jobId = res.job_id;
+        if (!jobId) return;
+
+        async function poll() {
+          const job = await getStatisticsJob(jobId!);
+          if (controller.signal.aborted) return;
+          if (job.status === "complete") {
+            if (job.result) setData(job.result);
+            setLoading(false);
+          } else if (job.status === "failed") {
+            setError(job.error_message ?? "Failed to load statistics.");
+            setLoading(false);
+          } else {
+            pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        }
+        await poll();
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : "Failed to load statistics.");
+        setLoading(false);
+      }
+    }
+
+    run();
     return () => {
-      cancelled = true;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [filters]);
 
@@ -75,7 +112,7 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
     );
   }
 
-  const { box_plot, histogram, annual_anomalies, decomposition, calendar_heatmap } = data;
+  const { box_plot, histogram, annual_anomalies, decomposition, calendar_heatmap, has_temporal_data } = data;
   const parameter = filters.parameter;
   const dl = (suffix: string) => (exportsEnabled.statistics ? `${parameter}-${suffix}` : undefined);
 
@@ -89,11 +126,19 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
       marker: { color: annual_anomalies.map((a) => (a.anomaly >= 0 ? ANOMALY_POS_COLOR : ANOMALY_NEG_COLOR)) },
     } as Data,
   ];
+  // Visualization Module audit fix (Statistics — Time Series
+  // Decomposition): each trace must declare BOTH its row's x-axis AND
+  // y-axis to correctly bind to the 4-row independent grid below —
+  // previously only Trend set an xaxis (mismatched against its own y2),
+  // and Original/Seasonal/Residual never set one at all, so they all
+  // fell back to the shared default x-axis while occupying 4 different
+  // y-axes, producing misaligned/cluttered rows. Decomposition math
+  // itself (trend/seasonal/residual arrays) is unchanged.
   const decompData: Data[] = [
-    { x: decomposition.dates, y: decomposition.trend.map((t, i) => t + decomposition.seasonal[i] + decomposition.residual[i]), type: "scatter", mode: "lines", name: "Original" } as Data,
-    { x: decomposition.dates, y: decomposition.trend, type: "scatter", mode: "lines", name: "Trend", xaxis: "x", yaxis: "y2" } as Data,
-    { x: decomposition.dates, y: decomposition.seasonal, type: "scatter", mode: "lines", name: "Seasonal", yaxis: "y3" } as Data,
-    { x: decomposition.dates, y: decomposition.residual, type: "scatter", mode: "lines", name: "Residual", yaxis: "y4" } as Data,
+    { x: decomposition.dates, y: decomposition.trend.map((t, i) => t + decomposition.seasonal[i] + decomposition.residual[i]), type: "scatter", mode: "lines", name: "Original", xaxis: "x", yaxis: "y" } as Data,
+    { x: decomposition.dates, y: decomposition.trend, type: "scatter", mode: "lines", name: "Trend", xaxis: "x2", yaxis: "y2" } as Data,
+    { x: decomposition.dates, y: decomposition.seasonal, type: "scatter", mode: "lines", name: "Seasonal", xaxis: "x3", yaxis: "y3" } as Data,
+    { x: decomposition.dates, y: decomposition.residual, type: "scatter", mode: "lines", name: "Residual", xaxis: "x4", yaxis: "y4" } as Data,
   ];
   const calendarData: Data[] = [
     {
@@ -118,84 +163,114 @@ export default function StatisticsModule({ filters }: StatisticsModuleProps) {
             <PlotlyChart data={boxData} layout={boxControls.layoutOverrides} resetKey={boxControls.resetKey} height={280} downloadFilename={dl("box-plot")} />
           </div>
         </div>
-        <div className="chart-container">
-          <div className="chart-head">
-            <div className="chart-title">Histogram of Daily Means</div>
-            <ChartToolbar onExpand={histFullscreen.expand} controls={histControls} options={{ grid: true, resetView: true }} />
+        {has_temporal_data ? (
+          <>
+            <div className="chart-container">
+              <div className="chart-head">
+                <div className="chart-title">Histogram of Daily Means</div>
+                <ChartToolbar onExpand={histFullscreen.expand} controls={histControls} options={{ grid: true, resetView: true }} />
+              </div>
+              <div className="chart-body">
+                <PlotlyChart data={histData} layout={histControls.layoutOverrides} resetKey={histControls.resetKey} height={280} downloadFilename={dl("histogram")} />
+              </div>
+            </div>
+            <div className="chart-container">
+              <div className="chart-head">
+                <div className="chart-title">Annual Anomalies</div>
+                <ChartToolbar onExpand={anomalyFullscreen.expand} controls={anomalyControls} options={{ grid: true, resetView: true }} />
+              </div>
+              <div className="chart-body">
+                <PlotlyChart data={anomalyData} layout={anomalyControls.layoutOverrides} resetKey={anomalyControls.resetKey} height={280} downloadFilename={dl("annual-anomalies")} />
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="chart-container" style={{ gridColumn: "span 2", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <p className="gis-caption" style={{ margin: 0, textAlign: "center" }}>
+              This dataset has no time dimension — histogram and annual anomalies (both
+              date-bucketed) don&apos;t apply. Box plot above is station-keyed, not
+              time-dependent, and still reflects real data.
+            </p>
           </div>
-          <div className="chart-body">
-            <PlotlyChart data={histData} layout={histControls.layoutOverrides} resetKey={histControls.resetKey} height={280} downloadFilename={dl("histogram")} />
-          </div>
-        </div>
-        <div className="chart-container">
-          <div className="chart-head">
-            <div className="chart-title">Annual Anomalies</div>
-            <ChartToolbar onExpand={anomalyFullscreen.expand} controls={anomalyControls} options={{ grid: true, resetView: true }} />
-          </div>
-          <div className="chart-body">
-            <PlotlyChart data={anomalyData} layout={anomalyControls.layoutOverrides} resetKey={anomalyControls.resetKey} height={280} downloadFilename={dl("annual-anomalies")} />
-          </div>
-        </div>
+        )}
       </div>
       {boxFullscreen.expanded && (
         <FullscreenOverlay title="Box Plot — All Stations" onClose={boxFullscreen.collapse}>
           <PlotlyChart data={boxData} layout={boxControls.layoutOverrides} height={640} downloadFilename={dl("box-plot")} />
         </FullscreenOverlay>
       )}
-      {histFullscreen.expanded && (
+      {has_temporal_data && histFullscreen.expanded && (
         <FullscreenOverlay title="Histogram of Daily Means" onClose={histFullscreen.collapse}>
           <PlotlyChart data={histData} layout={histControls.layoutOverrides} height={640} downloadFilename={dl("histogram")} />
         </FullscreenOverlay>
       )}
-      {anomalyFullscreen.expanded && (
+      {has_temporal_data && anomalyFullscreen.expanded && (
         <FullscreenOverlay title="Annual Anomalies" onClose={anomalyFullscreen.collapse}>
           <PlotlyChart data={anomalyData} layout={anomalyControls.layoutOverrides} height={640} downloadFilename={dl("annual-anomalies")} />
         </FullscreenOverlay>
       )}
 
-      <div className="chart-container" style={{ marginBottom: "1.2rem" }}>
-        <div className="chart-head">
-          <div className="chart-title">Time-Series Decomposition (Trend + Seasonal + Residual)</div>
-          <ChartToolbar onExpand={decompFullscreen.expand} controls={decompControls} options={{ legend: true, resetView: true }} />
-        </div>
-        <div className="chart-body">
-          <PlotlyChart
-            data={decompData}
-            layout={{ grid: { rows: 4, columns: 1, pattern: "independent" }, ...decompControls.layoutOverrides }}
-            resetKey={decompControls.resetKey}
-            height={420}
-            downloadFilename={dl("decomposition")}
-          />
-        </div>
-      </div>
-      {decompFullscreen.expanded && (
-        <FullscreenOverlay title="Time-Series Decomposition" onClose={decompFullscreen.collapse}>
-          <PlotlyChart
-            data={decompData}
-            layout={{ grid: { rows: 4, columns: 1, pattern: "independent" }, ...decompControls.layoutOverrides }}
-            height={720}
-            downloadFilename={dl("decomposition")}
-          />
-        </FullscreenOverlay>
-      )}
+      {has_temporal_data && (
+        <>
+          <div className="chart-container" style={{ marginBottom: "1.2rem" }}>
+            <div className="chart-head">
+              <div className="chart-title">Time-Series Decomposition (Trend + Seasonal + Residual)</div>
+              <ChartToolbar onExpand={decompFullscreen.expand} controls={decompControls} options={{ legend: true, resetView: true }} />
+            </div>
+            <div className="chart-body">
+              <PlotlyChart
+                data={decompData}
+                layout={{
+                  grid: { rows: 4, columns: 1, pattern: "independent" },
+                  yaxis: { title: { text: "Original" } },
+                  yaxis2: { title: { text: "Trend" } },
+                  yaxis3: { title: { text: "Seasonal" } },
+                  yaxis4: { title: { text: "Residual" } },
+                  ...decompControls.layoutOverrides,
+                }}
+                resetKey={decompControls.resetKey}
+                height={420}
+                downloadFilename={dl("decomposition")}
+              />
+            </div>
+          </div>
+          {decompFullscreen.expanded && (
+            <FullscreenOverlay title="Time-Series Decomposition" onClose={decompFullscreen.collapse}>
+              <PlotlyChart
+                data={decompData}
+                layout={{
+                  grid: { rows: 4, columns: 1, pattern: "independent" },
+                  yaxis: { title: { text: "Original" } },
+                  yaxis2: { title: { text: "Trend" } },
+                  yaxis3: { title: { text: "Seasonal" } },
+                  yaxis4: { title: { text: "Residual" } },
+                  ...decompControls.layoutOverrides,
+                }}
+                height={720}
+                downloadFilename={dl("decomposition")}
+              />
+            </FullscreenOverlay>
+          )}
 
-      <div className="chart-container">
-        <div className="chart-head">
-          <div className="chart-title">Calendar Heatmap — Value Intensity by Month</div>
-          <ChartToolbar
-            onExpand={calendarFullscreen.expand}
-            controls={calendarControls}
-            options={{ resetView: true, palette: { value: calendarRamp, onChange: setCalendarRamp } }}
-          />
-        </div>
-        <div className="chart-body">
-          <PlotlyChart data={calendarData} resetKey={calendarControls.resetKey} height={260} downloadFilename={dl("calendar-heatmap")} />
-        </div>
-      </div>
-      {calendarFullscreen.expanded && (
-        <FullscreenOverlay title="Calendar Heatmap" onClose={calendarFullscreen.collapse}>
-          <PlotlyChart data={calendarData} height={640} downloadFilename={dl("calendar-heatmap")} />
-        </FullscreenOverlay>
+          <div className="chart-container">
+            <div className="chart-head">
+              <div className="chart-title">Calendar Heatmap — Value Intensity by Month</div>
+              <ChartToolbar
+                onExpand={calendarFullscreen.expand}
+                controls={calendarControls}
+                options={{ resetView: true, palette: { value: calendarRamp, onChange: setCalendarRamp } }}
+              />
+            </div>
+            <div className="chart-body">
+              <PlotlyChart data={calendarData} resetKey={calendarControls.resetKey} height={260} downloadFilename={dl("calendar-heatmap")} />
+            </div>
+          </div>
+          {calendarFullscreen.expanded && (
+            <FullscreenOverlay title="Calendar Heatmap" onClose={calendarFullscreen.collapse}>
+              <PlotlyChart data={calendarData} height={640} downloadFilename={dl("calendar-heatmap")} />
+            </FullscreenOverlay>
+          )}
+        </>
       )}
     </div>
   );

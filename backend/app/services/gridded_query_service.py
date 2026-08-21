@@ -14,10 +14,12 @@ reason PLAN.md Phase 5 moved Zarr's processed-artifact layout from one
 zipped object to one-object-per-chunk under a shared prefix.
 """
 
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import date as date_type
 
+import dask
 import numpy as np
 import s3fs
 import xarray as xr
@@ -81,6 +83,24 @@ def _lat_lon_names(ds: xr.Dataset) -> tuple[str | None, str | None]:
     return lat_name, lon_name
 
 
+def _is_valid_coordinate(lat: object, lon: object) -> bool:
+    """Excludes a coordinate pair that's missing, NaN, or outside the
+    real WGS84 range — this project's Zarr coordinate arrays are already
+    geographic (confirmed: every real dataset's stored lat/lon values are
+    plain degrees, not a projected CRS the ingestion pipeline failed to
+    transform), so this is purely a sanity/validity filter on already-
+    computed values, never a second CRS implementation or transform."""
+    if lat is None or lon is None:
+        return False
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return False
+    if lat_f != lat_f or lon_f != lon_f:  # NaN != NaN
+        return False
+    return -90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0
+
+
 def _apply_bbox(ds: xr.Dataset, f: RecordsFilter | None, *, lat_name: str | None, lon_name: str | None) -> xr.Dataset:
     """Subsets by bounding box via xarray's own .where() against the
     lat/lon coordinate arrays — the gridded equivalent of catalog_
@@ -120,6 +140,38 @@ def _apply_date_range(ds: xr.Dataset, f: RecordsFilter | None) -> xr.Dataset:
     return ds
 
 
+# RecordsFilter fields this module deliberately does NOT apply, and why —
+# stated explicitly here rather than left as a silent gap (Visualization
+# & Filter Reliability investigation, issue #9):
+#
+# - f.station: a grid cell is not a station observation; there is no
+#   per-cell "which station" concept to match against. Applying it would
+#   mean inventing a fake mapping from station code to grid cell, which
+#   this module deliberately does not do — a station filter set alongside
+#   a gridded (CHUNKED_ARRAY) file simply does not restrict that file's
+#   contribution. The routing layer (visualize_service.py) is expected to
+#   surface this to the caller (e.g. via the coverage endpoint) rather
+#   than silently implying every filter narrowed every source equally.
+# - f.quality/f.source/f.platform/f.format_/f.processing_level: these are
+#   per-observation tabular metadata columns with no equivalent in a
+#   gridded array (a Zarr store has coordinates + data variables, not
+#   per-cell provenance columns) — genuinely inapplicable, not merely
+#   unimplemented.
+# - category (on VizFilterParams, not even a RecordsFilter field — see
+#   visualize_service._viz_filter_to_records_filter): category is
+#   Dataset-level metadata, not a per-record/per-cell property, so it has
+#   no meaningful translation into a WHERE-clause-style predicate here
+#   either. In practice this is moot: every non-legacy (Parquet/Zarr)
+#   routing path only ever runs when dataset_id is already set (a single,
+#   already-selected dataset), at which point "category" can only ever
+#   match-or-not-match that one dataset as a whole — it was already
+#   applied, implicitly, by the act of selecting that dataset.
+#
+# f.lat_min/lat_max/lon_min/lon_max and f.date_from/date_to (both applied
+# above) are the only RecordsFilter fields with a genuine per-cell analog
+# for gridded data.
+
+
 @dataclass
 class GriddedPreviewRow:
     """Duck-typed equivalent of a DatasetRecord row, sourced from a Zarr
@@ -149,17 +201,37 @@ class GriddedSpatialPoint:
     value: float
 
 
+#: Fallback point cap used only if a caller doesn't pass max_points
+#: explicitly — real callers (visualize_service.get_spatial_points,
+#: worker/tasks/visualize.py's Celery job path) derive their own cap from
+#: the existing admin-configurable SiteSettings.viz_max_grid_resolution
+#: (see get_spatial_points' docstring for the rationale), so this is a
+#: safety net, not the primary source of truth.
+_DEFAULT_MAX_GRIDDED_SPATIAL_POINTS = 10_000
+
+
 def get_spatial_points(
-    dataset_file: DatasetFile, parameter: str, f: RecordsFilter | None
+    dataset_file: DatasetFile,
+    parameter: str,
+    f: RecordsFilter | None,
+    *,
+    max_points: int = _DEFAULT_MAX_GRIDDED_SPATIAL_POINTS,
 ) -> list[GriddedSpatialPoint]:
     """The gridded equivalent of tabular_query_service.get_spatial_points
     — latest (last-timestep) value per grid cell, labeled by its own
     lat/lon since a Zarr grid has no Station join either. Every cell is
     returned as one "point" (unlike tabular data's per-row stations, a
-    grid's points ARE its cells) — for a large grid this can be many
-    points, matching how the legacy path already returns one point per
-    station with no cap; Visualize's IDW/interpolation step downstream
-    handles arbitrary point counts already."""
+    grid's points ARE its cells) — for a large grid this is a real
+    concern (a 180x180 grid is already 32,400 candidate points; a bigger
+    one can reach millions), so the result is stride-sampled down to at
+    most max_points when the grid exceeds it, rather than turning every
+    cell into a Leaflet marker on the frontend. The interpolation SURFACE
+    (compute_interpolation's colored raster, the primary spatial visual)
+    is unaffected — this cap only bounds the optional raw "Observation
+    Points" marker layer. max_points should be derived by the caller from
+    the existing admin-configurable viz_max_grid_resolution setting
+    (grid_resolution**2 — the same ceiling already applied to the
+    interpolation grid's own cell count), not a new independent limit."""
     ds = _open_zarr(dataset_file)
     try:
         if parameter not in ds.data_vars:
@@ -171,6 +243,14 @@ def get_spatial_points(
         filtered = _apply_date_range(_apply_bbox(ds, f, lat_name=lat_name, lon_name=lon_name), f)
         data_array = filtered[parameter]
         if "time" in data_array.dims:
+            # A date/bbox filter that excludes every timestep leaves a
+            # genuinely zero-length time dimension here — .isel(time=-1)
+            # on that raises IndexError rather than meaning "no data",
+            # same failure class as get_timeseries_aggregate's .resample()
+            # below. An out-of-range filter must behave like the SQL/
+            # DuckDB paths already do (an empty result), not crash.
+            if data_array.sizes.get("time", 0) == 0:
+                return []
             data_array = data_array.isel(time=-1)
 
         lat_vals = np.asarray(filtered[lat_name].values)
@@ -179,18 +259,38 @@ def get_spatial_points(
 
         points: list[GriddedSpatialPoint] = []
         if lat_vals.ndim == 1 and lon_vals.ndim == 1 and values.ndim == 2:
-            for i, lat in enumerate(lat_vals):
-                for j, lon in enumerate(lon_vals):
+            total_cells = len(lat_vals) * len(lon_vals)
+            # Even stride per axis so sqrt(total/max_points) samples in
+            # each dimension multiply back out to roughly max_points —
+            # e.g. a 1000x1000 grid capped at 10,000 uses stride 10 on
+            # both axes (100x100 = 10,000 sampled cells), not a lopsided
+            # single-axis stride.
+            stride = max(1, int(math.ceil(math.sqrt(total_cells / max_points)))) if total_cells > max_points else 1
+            for i in range(0, len(lat_vals), stride):
+                lat = lat_vals[i]
+                for j in range(0, len(lon_vals), stride):
+                    lon = lon_vals[j]
                     v = values[i, j]
-                    if v is not None and not (isinstance(v, float) and np.isnan(v)):
+                    if (
+                        v is not None
+                        and not (isinstance(v, float) and np.isnan(v))
+                        and _is_valid_coordinate(lat, lon)
+                    ):
                         points.append(
                             GriddedSpatialPoint(station=f"{lat},{lon}", lat=float(lat), lon=float(lon), value=float(v))
                         )
         else:
             # 2-D curvilinear coords — lat/lon/value all share the same shape.
             flat_lat, flat_lon, flat_val = lat_vals.ravel(), lon_vals.ravel(), values.ravel()
-            for lat, lon, v in zip(flat_lat, flat_lon, flat_val, strict=True):
-                if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            total_cells = flat_lat.size
+            stride = max(1, math.ceil(total_cells / max_points)) if total_cells > max_points else 1
+            for idx in range(0, total_cells, stride):
+                lat, lon, v = flat_lat[idx], flat_lon[idx], flat_val[idx]
+                if (
+                    v is not None
+                    and not (isinstance(v, float) and np.isnan(v))
+                    and _is_valid_coordinate(lat, lon)
+                ):
                     points.append(
                         GriddedSpatialPoint(station=f"{lat},{lon}", lat=float(lat), lon=float(lon), value=float(v))
                     )
@@ -217,6 +317,18 @@ def get_raw_values(
         lat_name, lon_name = _lat_lon_names(ds)
         filtered = _apply_date_range(_apply_bbox(ds, f, lat_name=lat_name, lon_name=lon_name), f)
         data_array = filtered[parameter]
+        if "time" not in data_array.dims:
+            # A static variable (e.g. bathymetry/elevation) can share a
+            # Zarr store with time-varying ones -- the dataset as a whole
+            # has a "time" coordinate (the check above), but this specific
+            # variable never had it as one of its own dims. Averaging over
+            # ALL its dims below would collapse it to a 0-d array with no
+            # "time" coordinate left to index, raising KeyError('time') --
+            # confirmed via direct reproduction against a real dataset.
+            # No time-series raw values exist for a variable with no time
+            # axis, so this is the same "nothing to return" contract the
+            # early-return above already uses for a missing parameter.
+            return []
         spatial_dims = [d for d in data_array.dims if d != "time"]
         spatial_mean = data_array.mean(dim=spatial_dims) if spatial_dims else data_array
         spatial_mean = spatial_mean.compute()
@@ -254,11 +366,19 @@ def get_matching_record_counts(dataset_file: DatasetFile, f: RecordsFilter) -> t
             return 0, total
 
         filtered = _apply_date_range(_apply_bbox(ds, f, lat_name=lat_name, lon_name=lon_name), f)
-        matching = 0
         selected_vars = [v for v in variables if not f.parameters or v in f.parameters]
-        for var in selected_vars:
-            if var in filtered.data_vars:
-                matching += int(filtered[var].count().values)
+        # Exact count stays exact (explicit decision — see docs/
+        # PERFORMANCE_FIX_PLAN.md Phase 4: scientific honesty over raw
+        # speed, no size-based estimate). The only safe lever left is
+        # HOW the count is computed: each filtered[var].count() is a
+        # separate lazy dask graph, and evaluating them one at a time in
+        # a loop (the previous implementation) triggers one independent
+        # .compute() per variable — for a multi-variable selection that's
+        # N sequential dask executions instead of one batched pass dask's
+        # scheduler can potentially overlap. dask.compute() on the whole
+        # list evaluates them together in a single pass instead.
+        lazy_counts = [filtered[var].count() for var in selected_vars if var in filtered.data_vars]
+        matching = sum(int(c) for c in dask.compute(*lazy_counts)) if lazy_counts else 0
 
         return matching, total
     finally:
@@ -359,6 +479,17 @@ def get_timeseries_aggregate(
         # grid first, then bucket-average timesteps).
         spatial_dims = [d for d in data_array.dims if d != "time"]
         spatial_mean = data_array.mean(dim=spatial_dims) if spatial_dims else data_array
+
+        # A date/bbox filter that excludes every timestep leaves a
+        # genuinely zero-length time dimension — xarray's .resample()
+        # raises ValueError("__resample_dim__ must not be empty") on
+        # that rather than returning an empty result, unlike the SQL/
+        # DuckDB paths' native handling of a query that matches zero
+        # rows. An out-of-range filter is a normal, valid request (e.g.
+        # the frontend's date-range default not yet covering this
+        # dataset's real extent) and must behave the same way here.
+        if spatial_mean.sizes.get("time", 0) == 0:
+            return []
 
         if resolution == "seasonal":
             # pandas has no offset alias for the app's Bangladesh

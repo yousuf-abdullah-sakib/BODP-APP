@@ -15,6 +15,20 @@ export interface VizFilterParams {
   depth_max?: number | null;
 }
 
+export interface CoverageRequest extends VizFilterParams {
+  parameter?: string | null;
+}
+
+export interface CoverageResponse {
+  matching_count: number;
+  dataset_total_count: number;
+  coverage_percent: number;
+  /** "cells" once the dataset has any gridded (Zarr) file, "records" otherwise. */
+  unit: "records" | "cells";
+  /** Plain-language notes about filters that could not be meaningfully applied to part of this dataset. */
+  notes: string[];
+}
+
 export interface SeriesPoint {
   date: string;
   value: number;
@@ -64,6 +78,8 @@ export interface TimeSeriesResponse {
   climatology: ClimatologyPoint[];
   rate_of_change: RateOfChangePoint[];
   anomaly: AnomalyPoint[];
+  /** False only when the selected dataset genuinely has no time dimension at all. */
+  has_temporal_data: boolean;
 }
 
 export interface SpatialPoint {
@@ -138,6 +154,8 @@ export interface CorrelationMatrix {
   matrix: number[][];
   /** Paired sample size backing each cell's r — same shape as matrix. */
   n: number[][];
+  /** How every cell's observations were paired — "exact_date_match" or "lat_lon_match" (no time dimension). */
+  pairing_method: string;
 }
 
 export interface ComparisonRequest extends VizFilterParams {
@@ -148,6 +166,26 @@ export interface ComparisonResponse {
   scatter: ScatterResult;
   series_by_parameter: Record<string, SeriesPoint[]>;
   correlation_matrix: CorrelationMatrix;
+  /** False only when the selected dataset genuinely has no time dimension at all. */
+  has_temporal_data: boolean;
+}
+
+/** Sync-vs-Celery-job envelope (Visualize Performance plan, Phase 4) —
+ * same status/job_id pattern as SpatialResponse. `result` is populated
+ * only when status is "complete". */
+export interface ComparisonJobResponse {
+  status: "complete" | "queued";
+  job_id?: string | null;
+  result?: ComparisonResponse | null;
+}
+
+export interface ComparisonJobStatus {
+  id: string;
+  status: string;
+  result?: ComparisonResponse | null;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
 }
 
 export interface BoxPlotSeries {
@@ -183,6 +221,71 @@ export interface StatisticsResponse {
   annual_anomalies: AnnualAnomaly[];
   decomposition: Decomposition;
   calendar_heatmap: CalendarHeatmap;
+  /**
+   * False only when the selected dataset genuinely has no time dimension
+   * at all. box_plot is NOT time-dependent (station/location-keyed) and
+   * still has real data even when this is false — only the
+   * histogram/annual_anomalies/decomposition/calendar_heatmap sections
+   * (all date-bucketed) go empty.
+   */
+  has_temporal_data: boolean;
+}
+
+/** Sync-vs-Celery-job envelope (Visualize Performance plan, Phase 4) —
+ * see ComparisonJobResponse/ComparisonJobStatus above for the full
+ * reasoning, identical shape here. */
+export interface StatisticsJobResponse {
+  status: "complete" | "queued";
+  job_id?: string | null;
+  result?: StatisticsResponse | null;
+}
+
+export interface StatisticsJobStatus {
+  id: string;
+  status: string;
+  result?: StatisticsResponse | null;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface ProfilePoint {
+  depth_m: number;
+  value: number;
+}
+
+export interface StationProfile {
+  station: string | null;
+  lat: number | null;
+  lon: number | null;
+  time: string | null;
+  points: ProfilePoint[];
+}
+
+export interface TSPair {
+  depth_m: number | null;
+  temperature: number;
+  salinity: number;
+  lat: number | null;
+  lon: number | null;
+  time: string | null;
+  station: string | null;
+}
+
+export interface ProfilesRequest extends VizFilterParams {
+  parameter?: string | null;
+  temperature_parameter?: string | null;
+  salinity_parameter?: string | null;
+}
+
+export type DepthConvention = "assumed_positive_down" | "assumed_negative_up";
+
+export interface ProfilesResponse {
+  profiles: StationProfile[];
+  ts_pairs: TSPair[];
+  /** False only when the selected dataset genuinely has no depth/vertical dimension at all. */
+  has_depth_data: boolean;
+  depth_convention: DepthConvention | null;
 }
 
 export interface VizExportSettings {
@@ -206,6 +309,11 @@ export interface VisualizableDatasetSummary {
   code: string;
   title: string;
   variables: string[];
+  /** null when this dataset has no temporal dimension at all. */
+  temporal_start: string | null;
+  temporal_end: string | null;
+  /** null when this dataset has no recorded spatial extent at all. */
+  spatial_extent: SpatialBounds | null;
 }
 
 export interface BoundaryShapefileSummary {

@@ -17,6 +17,8 @@ celery_app = Celery(
         "app.worker.tasks.admin_stats",
         "app.worker.tasks.reports",
         "app.worker.tasks.bulk_import",
+        "app.worker.tasks.snapshots",
+        "app.worker.tasks.backups",
     ],
 )
 
@@ -95,5 +97,12 @@ celery_app.conf.beat_schedule = {
     "capture-daily-stats-snapshot": {
         "task": "admin_stats.capture_daily_snapshot",
         "schedule": crontab(hour=6, minute=45),
+    },
+    # Visualize Performance plan Phase 10.3 — deliberately offset from the
+    # 6:00/6:30/6:45 admin-jobs window above, since a real pg_dump can run
+    # for minutes on a large DB and must never contend with those.
+    "run-nightly-backup": {
+        "task": "backups.run_scheduled_backup",
+        "schedule": crontab(hour=3, minute=0),
     },
 }

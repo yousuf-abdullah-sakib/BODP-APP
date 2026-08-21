@@ -1,7 +1,7 @@
 import uuid
 from datetime import date as date_type
 
-from sqlalchemy import Float, case, func, nulls_last, select
+from sqlalchemy import Float, and_, case, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +22,34 @@ from app.services.query_concurrency import bounded_to_thread
 
 _TAXONOMY_CACHE_KEY = "catalog:taxonomy"
 _TAXONOMY_CACHE_TTL_SECONDS = 300
+
+
+async def get_dataset_snapshot(dataset: Dataset) -> dict | None:
+    """Dataset Default-View Snapshot feature: returns the stored
+    precomputed snapshot dict for `dataset` if one exists AND is fresh
+    (dataset.snapshot_version == dataset.version), else None. A None
+    return means "no usable snapshot" for any reason — never generated,
+    storage object missing/corrupt, or stale from a since-changed
+    dataset — and the caller's only correct response is to fall back to
+    the exact existing live query path, unchanged. Never raises: any
+    storage/parse failure here is treated identically to "no snapshot",
+    since a broken snapshot fetch must never break the page a live query
+    would otherwise serve successfully."""
+    if dataset.snapshot_version is None or dataset.snapshot_version != dataset.version:
+        return None
+
+    import json
+
+    from app.services.storage.keys import snapshot_key
+    from app.services.storage.registry import default_bucket_for, get_storage_backend
+
+    try:
+        storage = get_storage_backend("vps_minio")
+        bucket = default_bucket_for("vps_minio")
+        body = storage.get(bucket, snapshot_key(dataset.id))
+        return json.loads(body.read())
+    except Exception:
+        return None
 
 # Mirrors the prototype's matchScore() weighting exactly (Master Plan §3
 # Phase 3 task 1 — "relevance scoring equivalent to the prototype's
@@ -233,6 +261,49 @@ async def get_station_options_for_dataset(
     return list(result.scalars().all())
 
 
+async def get_dataset_temporal_extent(
+    db: AsyncSession, dataset_id: uuid.UUID
+) -> tuple[date_type | None, date_type | None]:
+    """(earliest, latest) available timestamp for a dataset, from
+    already-stored metadata — never a live scan of the underlying data.
+    DatasetFile.temporal_start/temporal_end are set once per file at
+    ingestion time (from each parser's own one-time extent extraction,
+    see worker/tasks/ingestion.py), for BOTH legacy and Phase 5 Parquet/
+    Zarr files alike, so aggregating MIN/MAX across a dataset's files is
+    cheap (reads a handful of dataset_files rows) and reliable — unlike
+    Dataset.temporal_start/temporal_end (the dataset-level fields), which
+    only ever get set by the demo-seeding script, never by real
+    ingestion, and are therefore NOT a reliable source (see PLAN.md's
+    Visualization & Filter Reliability investigation).
+
+    Returns (None, None) for a dataset with no time-bearing files at all
+    (e.g. a scattered lat/lon survey with no time dimension) — this is a
+    real, correct state, never fabricated.
+
+    Falls back to aggregating DatasetRecord.time (indexed — a cheap
+    MIN/MAX, not a data scan) when no file has temporal_start set at
+    all — several pre-Phase-2 legacy datasets have real dated
+    DatasetRecord rows but were ingested before this code populated
+    DatasetFile.temporal_start/temporal_end, so the file-level field
+    being empty does NOT mean the dataset has no real temporal data."""
+    result = await db.execute(
+        select(func.min(DatasetFile.temporal_start), func.max(DatasetFile.temporal_end)).where(
+            DatasetFile.dataset_id == dataset_id, DatasetFile.temporal_start.is_not(None)
+        )
+    )
+    row = result.one()
+    if row[0] is not None:
+        return row[0], row[1]
+
+    fallback = await db.execute(
+        select(func.min(DatasetRecord.time), func.max(DatasetRecord.time)).where(
+            DatasetRecord.dataset_id == dataset_id, DatasetRecord.time.is_not(None)
+        )
+    )
+    fallback_row = fallback.one()
+    return fallback_row[0], fallback_row[1]
+
+
 async def get_dataset_schema_for_filters(
     db: AsyncSession, dataset_id: uuid.UUID
 ) -> DatasetSchemaFilters | None:
@@ -359,6 +430,65 @@ def _apply_record_filters(query, dataset_id: uuid.UUID, f: RecordsFilter):
         query = query.where(func.ST_Intersects(DatasetRecord.geom, envelope))
 
     return query
+
+
+async def get_profile_sql(
+    db: AsyncSession, dataset_id: uuid.UUID, parameter: str, f: RecordsFilter
+) -> list[tuple[str | None, float | None, float | None, date_type | None, float, float]]:
+    """Legacy (ROW_RECORDS/DatasetRecord) equivalent of tabular_query_
+    service.get_profile — every (station_code, lat, lon, time, depth_m,
+    value) row for one parameter with a non-null depth, grouping into
+    per-station-per-time profiles is done by the caller (visualize_
+    service.get_profiles), exactly mirroring how get_raw_values's SQL/
+    Parquet counterparts each return flat rows for the routing layer to
+    assemble. Depth-null rows are excluded at the SQL level — a row with
+    no depth cannot be placed on a vertical axis."""
+    base_query = select(
+        Station.code, DatasetRecord.lat, DatasetRecord.lon, DatasetRecord.time,
+        DatasetRecord.depth_m, DatasetRecord.value,
+    ).outerjoin(Station, Station.id == DatasetRecord.station_id)
+    if f.station:
+        base_query = base_query.join(Station, Station.id == DatasetRecord.station_id, isouter=False)
+    query = _apply_record_filters(base_query, dataset_id, f).where(
+        DatasetRecord.parameter == parameter, DatasetRecord.depth_m.isnot(None)
+    )
+    rows = (await db.execute(query)).all()
+    return [(station, float(lat) if lat is not None else None, float(lon) if lon is not None else None, t, float(depth), float(value)) for station, lat, lon, t, depth, value in rows]
+
+
+async def get_ts_pairs_sql(
+    db: AsyncSession, dataset_id: uuid.UUID, temperature_parameter: str, salinity_parameter: str, f: RecordsFilter
+) -> list[tuple[float | None, float, float, float | None, float | None, date_type | None, str | None]]:
+    """Legacy equivalent of tabular_query_service.get_ts_pairs — a real
+    SQL self-join on (station_id, time, depth_m) so temperature and
+    salinity are paired from the same underlying observation, never
+    independently aggregated then zipped."""
+    T = DatasetRecord.__table__.alias("t_rec")
+    S = DatasetRecord.__table__.alias("s_rec")
+    join_cond = [
+        T.c.dataset_id == S.c.dataset_id,
+        T.c.station_id.is_not_distinct_from(S.c.station_id),
+        T.c.time.is_not_distinct_from(S.c.time),
+        T.c.depth_m.is_not_distinct_from(S.c.depth_m),
+    ]
+    query = (
+        select(T.c.depth_m, T.c.value, S.c.value, T.c.lat, T.c.lon, T.c.time, Station.code)
+        .select_from(T.join(S, and_(*join_cond)))
+        .outerjoin(Station, Station.id == T.c.station_id)
+        .where(T.c.dataset_id == dataset_id, T.c.parameter == temperature_parameter, S.c.parameter == salinity_parameter)
+    )
+    if f.date_from:
+        query = query.where(T.c.time >= f.date_from)
+    if f.date_to:
+        query = query.where(T.c.time <= f.date_to)
+    if f.station:
+        query = query.where(Station.code == f.station)
+    rows = (await db.execute(query)).all()
+    return [
+        (float(depth) if depth is not None else None, float(temp), float(sal),
+         float(lat) if lat is not None else None, float(lon) if lon is not None else None, t, station)
+        for depth, temp, sal, lat, lon, t, station in rows
+    ]
 
 
 async def _get_matching_record_counts_sql(

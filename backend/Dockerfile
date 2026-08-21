@@ -13,6 +13,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # (Master Plan §3 Phase 2 extensibility — python:3.12-slim omits these by
 # default, so rasterio import fails at runtime without them even though pip
 # install succeeds cleanly).
+# postgresql-client: pg_dump/pg_restore for Phase 10.3's real backup task
+# (worker/tasks/backups.py, celery-worker uses this same image) — the
+# base image's default repo candidate matches the postgis/postgis:17-3.5
+# server major version exactly (confirmed via apt-cache policy), so no
+# pinned third-party apt repo is needed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     gcc \
@@ -21,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgeos-c1v5 \
     libproj-dev \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -7,7 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import get_client_ip, get_current_user
-from app.models.requests import AccessGrant, DownloadLog, ExtractionStatus, GrantStatus
+from app.core.limiter import limiter
+from app.models.requests import AccessGrant, DatasetRequest, DownloadLog, ExtractionStatus, GrantStatus
 from app.models.user import User
 from app.schemas.requests import (
     ExtractionCreate,
@@ -18,13 +19,20 @@ from app.schemas.requests import (
 )
 from app.services import extraction_service, requests_service
 from app.services.storage.registry import get_storage_backend
+from app.services.supporting_document_service import (
+    SupportingDocumentUploadError,
+    upload_supporting_document,
+    validate_supporting_document_extension,
+)
 from app.worker.tasks.notifications import send_request_submitted
 
 router = APIRouter(tags=["requests"])
 
 
 @router.post("/requests", response_model=RequestSummary, status_code=201)
+@limiter.limit(settings.RATE_LIMIT_MUTATIONS)
 async def submit_request(
+    request: Request,
     dataset_id: uuid.UUID = Form(...),
     justification: str = Form(...),
     search_criteria: str | None = Form(default=None),
@@ -34,11 +42,9 @@ async def submit_request(
 ):
     """Dataset access request submission (Master Plan §3 Phase 4 task 1) —
     from the catalog detail page's "Request Access" modal. `file` (an
-    optional supporting document) is accepted but not persisted in this
-    phase: DatasetRequest.supporting_document_file_id targets dataset_files,
-    which is shaped for scientific data files, not request attachments — a
-    mismatched fit. The Master Plan marks the attachment as optional, so this
-    is a deliberate simplification rather than a missing feature."""
+    optional supporting document) is validated, stored via
+    supporting_document_service, and linked to the created DatasetRequest
+    via RequestSupportingDocument (see app/models/requests.py)."""
     if len(justification.strip()) < 50:
         raise HTTPException(
             status_code=422, detail="Justification must be at least 50 characters."
@@ -51,6 +57,16 @@ async def submit_request(
         except (json.JSONDecodeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail="Invalid search_criteria") from exc
 
+    # Validate the document BEFORE creating the request, so a rejected
+    # file (bad type/too large) never leaves a request behind with a
+    # missing attachment — the request only starts existing once we know
+    # the document (if any) is acceptable.
+    if file is not None and file.filename:
+        try:
+            validate_supporting_document_extension(file.filename)
+        except SupportingDocumentUploadError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
     request = await requests_service.create_request(
         db,
         user=current_user,
@@ -58,6 +74,35 @@ async def submit_request(
         justification=justification,
         search_criteria=criteria,
     )
+
+    if file is not None and file.filename:
+        # Captured before any commit/rollback below can expire `request`'s
+        # attributes — reading request.id afterward would trigger an
+        # implicit synchronous lazy-load, which AsyncSession cannot do.
+        request_id = request.id
+        try:
+            document = await upload_supporting_document(
+                db,
+                request_id=request_id,
+                filename=file.filename,
+                file_stream=file,
+                uploaded_by=current_user.id,
+            )
+            request.supporting_document_id = document.id
+            await db.commit()
+        except SupportingDocumentUploadError as exc:
+            # The document could not be stored/linked — the request must
+            # not appear successfully submitted while its document is
+            # missing, so the request itself is rolled back too (no
+            # orphaned request, no orphaned storage object).
+            await db.rollback()
+            request_row = await db.get(DatasetRequest, request_id)
+            if request_row is not None:
+                await db.delete(request_row)
+                await db.commit()
+            raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+        request = await requests_service.get_request_for_admin(db, request_id)
 
     send_request_submitted.delay(str(request.id))
 
@@ -91,7 +136,9 @@ async def _get_owned_grant(db: AsyncSession, grant_id: uuid.UUID, user_id: uuid.
 
 
 @router.post("/me/grants/{grant_id}/extract", response_model=ExtractionStatusResponse, status_code=202)
+@limiter.limit(settings.RATE_LIMIT_MUTATIONS)
 async def extract_grant_subset(
+    request: Request,
     grant_id: uuid.UUID,
     body: ExtractionCreate,
     current_user: User = Depends(get_current_user),

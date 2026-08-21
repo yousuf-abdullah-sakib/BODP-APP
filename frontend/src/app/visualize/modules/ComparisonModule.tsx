@@ -6,7 +6,7 @@ import ChartToolbar, { useChartControls } from "@/components/charts/ChartToolbar
 import { useFullscreenChart, FullscreenOverlay } from "@/components/charts/FullscreenChartWrapper";
 import type { ColorRampName } from "@/lib/geo/colorRamp";
 import { ApiError } from "@/lib/api/client";
-import { postComparison } from "@/lib/api/visualize";
+import { getComparisonJob, postComparison } from "@/lib/api/visualize";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
 import type { ComparisonResponse } from "@/lib/types/visualize";
@@ -17,12 +17,22 @@ interface ComparisonModuleProps {
   availableParameters: string[];
 }
 
+// Heavy requests dispatch to a Celery job (Visualize Performance plan,
+// Phase 4) instead of computing in-process — same poll loop
+// SpatialMappingModule.tsx already uses for its own job dispatch.
+const POLL_INTERVAL_MS = 1500;
+
 // Human-readable labels for ScatterResult.pairing_method — a stable,
 // machine-readable value from the backend (e.g. "exact_date_match")
 // mapped to display text here, same pattern as SpatialMappingModule's
 // BASE_MAPS/interpolation-method labels.
 const PAIRING_METHOD_LABELS: Record<string, string> = {
   exact_date_match: "Exact date match",
+  // Visualize Module audit fix (Multivariable — Non-Temporal Datasets):
+  // the backend's fallback pairing key for a dataset with no time
+  // dimension — observations are paired by matching (lat, lon) instead
+  // of matching date.
+  lat_lon_match: "Matched by location (lat/lon)",
 };
 
 export default function ComparisonModule({ filters, availableParameters }: ComparisonModuleProps) {
@@ -47,21 +57,53 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
   const corrControls = useChartControls({ resetView: true });
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
     setLoading(true);
     setError(null);
-    postComparison({ parameters: [xVar, yVar], ...toVizFilterParams(filters) })
-      .then((res) => {
-        if (!cancelled) setScatterData2(res);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(err instanceof ApiError ? err.message : "Failed to load comparison data.");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+
+    async function run() {
+      try {
+        const res = await postComparison(
+          { parameters: [xVar, yVar], ...toVizFilterParams(filters) },
+          { signal: controller.signal }
+        );
+
+        if (res.status === "complete") {
+          if (res.result) setScatterData2(res.result);
+          setLoading(false);
+          return;
+        }
+
+        const jobId = res.job_id;
+        if (!jobId) return;
+
+        async function poll() {
+          const job = await getComparisonJob(jobId!);
+          if (controller.signal.aborted) return;
+          if (job.status === "complete") {
+            if (job.result) setScatterData2(job.result);
+            setLoading(false);
+          } else if (job.status === "failed") {
+            setError(job.error_message ?? "Failed to load comparison data.");
+            setLoading(false);
+          } else {
+            pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        }
+        await poll();
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : "Failed to load comparison data.");
+        setLoading(false);
+      }
+    }
+
+    run();
     return () => {
-      cancelled = true;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [xVar, yVar, filters]);
 
@@ -70,14 +112,49 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
       setCorrData(null);
       return;
     }
-    let cancelled = false;
-    postComparison({ parameters: corrVars, ...toVizFilterParams(filters) })
-      .then((res) => {
-        if (!cancelled) setCorrData(res);
-      })
-      .catch(() => {});
+    const controller = new AbortController();
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+    async function run() {
+      try {
+        const res = await postComparison(
+          { parameters: corrVars, ...toVizFilterParams(filters) },
+          { signal: controller.signal }
+        );
+
+        if (res.status === "complete") {
+          if (res.result) setCorrData(res.result);
+          return;
+        }
+
+        const jobId = res.job_id;
+        if (!jobId) return;
+
+        async function poll() {
+          const job = await getComparisonJob(jobId!);
+          if (controller.signal.aborted) return;
+          if (job.status === "complete") {
+            if (job.result) setCorrData(job.result);
+          } else if (job.status === "failed") {
+            // Matrix errors were already silently swallowed before this
+            // phase — kept as-is (the scatter effect above is the one
+            // that surfaces a visible error state).
+          } else {
+            pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
+          }
+        }
+        await poll();
+      } catch {
+        // Matches this effect's pre-existing behavior — errors here were
+        // always silently swallowed (see the scatter effect above for
+        // the one that surfaces a visible error).
+      }
+    }
+
+    run();
     return () => {
-      cancelled = true;
+      controller.abort();
+      if (pollTimer) clearTimeout(pollTimer);
     };
   }, [corrVars, filters]);
 
@@ -180,6 +257,15 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
       </div>
     );
   }
+  // Visualize Module audit fix (Multivariable — Non-Temporal Datasets):
+  // previously this whole module was blocked for any dataset with no
+  // time dimension. Scatter/regression and the correlation matrix now
+  // work via the backend's (lat, lon) pairing fallback — only the
+  // "Multi-Variable Time Series" sub-chart genuinely has no meaning
+  // without a date axis, so only that one section is conditionally
+  // hidden below (same principle as Statistics leaving its own
+  // date-bucketed sections empty rather than fabricated).
+  const hasTemporalData = scatterData2?.has_temporal_data ?? true;
 
   return (
     <div>
@@ -229,22 +315,34 @@ export default function ComparisonModule({ filters, availableParameters }: Compa
         </FullscreenOverlay>
       )}
 
-      <div className="chart-container" style={{ marginBottom: "1.2rem" }}>
-        <div className="chart-head">
-          <div>
-            <div className="chart-title">Multi-Variable Time Series</div>
-            <div className="chart-subtitle">
-              {xVar} &amp; {yVar} overlaid on dual axes — respects active sidebar filters
+      {hasTemporalData ? (
+        <>
+          <div className="chart-container" style={{ marginBottom: "1.2rem" }}>
+            <div className="chart-head">
+              <div>
+                <div className="chart-title">Multi-Variable Time Series</div>
+                <div className="chart-subtitle">
+                  {xVar} &amp; {yVar} overlaid on dual axes — respects active sidebar filters
+                </div>
+              </div>
+              <ChartToolbar onExpand={tsFullscreen.expand} controls={tsControls} options={{ legend: true, grid: true, resetView: true }} />
             </div>
+            <div className="chart-body">{tsChart(300)}</div>
           </div>
-          <ChartToolbar onExpand={tsFullscreen.expand} controls={tsControls} options={{ legend: true, grid: true, resetView: true }} />
+          {tsFullscreen.expanded && (
+            <FullscreenOverlay title={`${xVar} & ${yVar} — Multi-Variable Time Series`} onClose={tsFullscreen.collapse}>
+              {tsChart(640)}
+            </FullscreenOverlay>
+          )}
+        </>
+      ) : (
+        <div className="chart-container" style={{ marginBottom: "1.2rem", display: "flex", alignItems: "center", justifyContent: "center", minHeight: 120 }}>
+          <p className="gis-caption" style={{ margin: 0, textAlign: "center" }}>
+            This dataset has no time dimension — the time-series overlay doesn&apos;t apply. Scatter,
+            regression, and the correlation matrix above/below still reflect real paired data, matched by
+            location instead of date.
+          </p>
         </div>
-        <div className="chart-body">{tsChart(300)}</div>
-      </div>
-      {tsFullscreen.expanded && (
-        <FullscreenOverlay title={`${xVar} & ${yVar} — Multi-Variable Time Series`} onClose={tsFullscreen.collapse}>
-          {tsChart(640)}
-        </FullscreenOverlay>
       )}
 
       <div className="chart-container">

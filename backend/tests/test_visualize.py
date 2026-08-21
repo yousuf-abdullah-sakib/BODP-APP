@@ -4,7 +4,7 @@ from datetime import date
 import pytest
 
 from app.core.database import AsyncSessionLocal
-from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, DatasetStatus, Station
+from app.models.catalog import Dataset, DatasetCategory, DatasetRecord, DatasetStatus, DatasetVariable, Station
 from app.models.visualize import VizJobStatus
 
 pytestmark = pytest.mark.asyncio
@@ -432,7 +432,9 @@ class TestComparison:
             json={"parameters": [_PARAM, "Salinity"]},
         )
         assert r.status_code == 200, r.text
-        body = r.json()
+        envelope = r.json()
+        assert envelope["status"] == "complete"
+        body = envelope["result"]
         assert body["scatter"]["r"] == pytest.approx(1.0, abs=0.01)
         # y = 2x -> slope ~2
         assert body["scatter"]["regression"]["slope"] == pytest.approx(2.0, abs=0.01)
@@ -502,7 +504,7 @@ class TestComparison:
             json={"parameters": [full_param, partial_param]},
         )
         assert r.status_code == 200, r.text
-        body = r.json()
+        body = r.json()["result"]
         assert body["scatter"]["n"] == 5
         assert len(body["scatter"]["x"]) == 5
         assert len(body["scatter"]["y"]) == 5
@@ -513,7 +515,7 @@ class TestComparison:
             "/api/v1/visualize/comparison",
             json={"parameters": [_PARAM, "Salinity"]},
         )
-        body = r.json()
+        body = r.json()["result"]
         matrix = body["correlation_matrix"]["matrix"]
         assert matrix[0][0] == pytest.approx(1.0)
         assert matrix[1][1] == pytest.approx(1.0)
@@ -542,6 +544,186 @@ class TestComparison:
         assert r.status_code == 422
 
 
+class TestComparisonNonTemporal:
+    """Visualize Module audit fix (Multivariable — Non-Temporal Datasets):
+    a dataset confirmed to have NO temporal DatasetVariable must still
+    produce a real scatter/regression/correlation result, paired by
+    (lat, lon) instead of by date — not the previous silent r=0.0/n=0
+    empty result."""
+
+    async def _seed_non_temporal_fixture(self) -> dict:
+        """5 distinct (lat, lon) locations, 2 parameters with values at
+        every location — a purely spatial dataset with no time dimension
+        at all, mirroring the real "My Data" dataset's shape (confirmed
+        via live verification: every location has both parameters)."""
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Non-Temporal Test", description="test", color_tag="cat-non-temporal")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-VIZ-NOTIME",
+                title="Non-Temporal Test Dataset",
+                category_id=category.id,
+                status=DatasetStatus.PUBLISHED.value,
+                record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+
+            # Two approved, non-dimension DatasetVariables — required by
+            # validate_parameter_for_dataset — and deliberately NO
+            # temporal DatasetVariable at all, so
+            # dataset_has_temporal_dimension is false for this dataset.
+            db.add_all(
+                [
+                    DatasetVariable(
+                        dataset_id=dataset.id, name="Bathymetry", data_type="numeric",
+                        is_dimension=False, roles=["visualization_variable"],
+                    ),
+                    DatasetVariable(
+                        dataset_id=dataset.id, name="Density", data_type="numeric",
+                        is_dimension=False, roles=["visualization_variable"],
+                    ),
+                ]
+            )
+
+            # y = 3x + 1 exactly, at 5 distinct locations, no time
+            # column set at all (time=None) — for exact hand-computable
+            # regression/correlation.
+            locations = [(20.0, 90.0), (20.5, 90.5), (21.0, 91.0), (21.5, 91.5), (22.0, 92.0)]
+            for i, (lat, lon) in enumerate(locations):
+                x_value = float(i + 1)
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id, time=None, lat=lat, lon=lon,
+                        parameter="Bathymetry", value=x_value, quality_flag="normal",
+                        geom=f"SRID=4326;POINT({lon} {lat})",
+                    )
+                )
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id, time=None, lat=lat, lon=lon,
+                        parameter="Density", value=3.0 * x_value + 1.0, quality_flag="normal",
+                        geom=f"SRID=4326;POINT({lon} {lat})",
+                    )
+                )
+            await db.commit()
+            return {"dataset_id": str(dataset.id)}
+
+    async def test_scatter_and_regression_use_lat_lon_pairing(self, client):
+        seed = await self._seed_non_temporal_fixture()
+        r = await client.post(
+            "/api/v1/visualize/comparison",
+            json={"dataset_id": seed["dataset_id"], "parameters": ["Bathymetry", "Density"]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()["result"]
+        assert body["has_temporal_data"] is False
+        assert body["scatter"]["pairing_method"] == "lat_lon_match"
+        # All 5 locations have both parameters -> full pairing, not the
+        # previous silent n=0/r=0.0 empty result.
+        assert body["scatter"]["n"] == 5
+        assert len(body["scatter"]["x"]) == 5
+        assert len(body["scatter"]["y"]) == 5
+        # y = 3x + 1 exactly -> perfect correlation.
+        assert body["scatter"]["r"] == pytest.approx(1.0, abs=1e-9)
+        assert body["scatter"]["regression"]["slope"] == pytest.approx(3.0, abs=1e-9)
+        assert body["scatter"]["regression"]["intercept"] == pytest.approx(1.0, abs=1e-9)
+
+    async def test_correlation_matrix_uses_lat_lon_pairing(self, client):
+        seed = await self._seed_non_temporal_fixture()
+        r = await client.post(
+            "/api/v1/visualize/comparison",
+            json={"dataset_id": seed["dataset_id"], "parameters": ["Bathymetry", "Density"]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()["result"]
+        assert body["correlation_matrix"]["pairing_method"] == "lat_lon_match"
+        matrix = body["correlation_matrix"]["matrix"]
+        assert matrix[0][0] == pytest.approx(1.0)
+        assert matrix[1][1] == pytest.approx(1.0)
+        assert matrix[0][1] == pytest.approx(1.0, abs=1e-9)
+        n_matrix = body["correlation_matrix"]["n"]
+        assert n_matrix[0][0] == 5
+        assert n_matrix[1][1] == 5
+        assert n_matrix[0][1] == 5
+
+    async def test_series_by_parameter_empty_for_non_temporal_dataset(self, client):
+        """series_by_parameter has no meaning without a date axis (its
+        only consumer, the frontend's time-series overlay, is itself
+        gated on has_temporal_data) — must stay empty, never fabricated
+        with fake dates."""
+        seed = await self._seed_non_temporal_fixture()
+        r = await client.post(
+            "/api/v1/visualize/comparison",
+            json={"dataset_id": seed["dataset_id"], "parameters": ["Bathymetry", "Density"]},
+        )
+        body = r.json()["result"]
+        assert body["series_by_parameter"] == {}
+
+    async def test_temporal_dataset_still_uses_exact_date_match(self, client):
+        """Regression guard: a dataset WITH a temporal dimension must be
+        completely unaffected by the lat/lon fallback — same exact-date
+        pairing as before, dataset_id set this time (unlike the other
+        TestComparison tests, which omit it)."""
+        async with AsyncSessionLocal() as db:
+            category = DatasetCategory(name="Temporal Regression Test", description="test", color_tag="cat-temporal")
+            db.add(category)
+            await db.flush()
+            dataset = Dataset(
+                code="BD-VIZ-STILLTIME", title="Temporal Regression Test Dataset",
+                category_id=category.id, status=DatasetStatus.PUBLISHED.value, record_count=0,
+            )
+            db.add(dataset)
+            await db.flush()
+            db.add_all(
+                [
+                    DatasetVariable(
+                        dataset_id=dataset.id, name="time", data_type="temporal",
+                        is_dimension=True, roles=["dimension"],
+                    ),
+                    DatasetVariable(
+                        dataset_id=dataset.id, name="TempA", data_type="numeric",
+                        is_dimension=False, roles=["visualization_variable"],
+                    ),
+                    DatasetVariable(
+                        dataset_id=dataset.id, name="TempB", data_type="numeric",
+                        is_dimension=False, roles=["visualization_variable"],
+                    ),
+                ]
+            )
+            for month in range(1, 13):
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id, time=date(2024, month, 15), lat=21.0, lon=90.0,
+                        parameter="TempA", value=float(month), quality_flag="normal",
+                        geom="SRID=4326;POINT(90.0 21.0)",
+                    )
+                )
+                db.add(
+                    DatasetRecord(
+                        dataset_id=dataset.id, time=date(2024, month, 15), lat=21.0, lon=90.0,
+                        parameter="TempB", value=float(month) * 2.0, quality_flag="normal",
+                        geom="SRID=4326;POINT(90.0 21.0)",
+                    )
+                )
+            await db.commit()
+            dataset_id = str(dataset.id)
+
+        r = await client.post(
+            "/api/v1/visualize/comparison",
+            json={"dataset_id": dataset_id, "parameters": ["TempA", "TempB"]},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()["result"]
+        assert body["has_temporal_data"] is True
+        assert body["scatter"]["pairing_method"] == "exact_date_match"
+        assert body["correlation_matrix"]["pairing_method"] == "exact_date_match"
+        assert body["scatter"]["n"] == 12
+        assert body["scatter"]["r"] == pytest.approx(1.0, abs=1e-9)
+        assert len(body["series_by_parameter"]["TempA"]) == 12
+
+
 class TestStatistics:
     async def test_decomposition_sums_to_original_value(self, client):
         await _seed_timeseries_fixture()
@@ -552,7 +734,7 @@ class TestStatistics:
             "/api/v1/visualize/statistics", json={"parameter": _PARAM, "station": "ST-A"}
         )
         assert r.status_code == 200, r.text
-        decomp = r.json()["decomposition"]
+        decomp = r.json()["result"]["decomposition"]
         n = len(decomp["dates"])
         assert n == 12
         for i in range(n):
@@ -568,14 +750,14 @@ class TestStatistics:
         r = await client.post(
             "/api/v1/visualize/statistics", json={"parameter": _PARAM, "station": "ST-A"}
         )
-        anomalies = r.json()["annual_anomalies"]
+        anomalies = r.json()["result"]["annual_anomalies"]
         assert len(anomalies) == 1
         assert anomalies[0]["year"] == 2024
 
     async def test_box_plot_limited_to_six_stations(self, client):
         await _seed_timeseries_fixture()
         r = await client.post("/api/v1/visualize/statistics", json={"parameter": _PARAM})
-        box_plot = r.json()["box_plot"]
+        box_plot = r.json()["result"]["box_plot"]
         assert len(box_plot) <= 6
         assert len(box_plot) == 3  # stations A, B, C
 
@@ -584,7 +766,7 @@ class TestStatistics:
         r = await client.post(
             "/api/v1/visualize/statistics", json={"parameter": _PARAM, "station": "ST-A"}
         )
-        heatmap = r.json()["calendar_heatmap"]
+        heatmap = r.json()["result"]["calendar_heatmap"]
         assert heatmap["years"] == [2024]
         assert len(heatmap["months"]) == 12
         assert len(heatmap["z"][0]) == 12
@@ -610,6 +792,50 @@ class TestCaching:
 
         r2 = await client.post("/api/v1/visualize/timeseries", json={"parameter": _PARAM})
         assert r2.json()["stats"]["mean"] == r1.json()["stats"]["mean"]
+
+    async def test_identical_coverage_request_is_cached(self, client):
+        """Regression for the Performance & Behavior investigation: the
+        coverage endpoint had no caching at all (unlike timeseries/
+        comparison/statistics, all covered above), so every filter
+        interaction on a large gridded dataset re-paid its expensive
+        exact-count cost. Same proof pattern as the timeseries cache
+        test above: mutate underlying data after the first call, and
+        confirm the second identical request still returns the stale
+        (pre-mutation) count -- proving the cache path was actually hit,
+        not just that the numbers happened to match."""
+        fixture = await _seed_timeseries_fixture()
+        dataset_id = str(fixture["dataset_id"])
+
+        r1 = await client.post(
+            "/api/v1/visualize/coverage", json={"dataset_id": dataset_id, "parameter": _PARAM}
+        )
+        assert r1.status_code == 200, r1.text
+        first = r1.json()
+        assert first["matching_count"] > 0
+
+        # Add another matching record -- an uncached second call would
+        # see a different (higher) matching_count.
+        async with AsyncSessionLocal() as db:
+            db.add(
+                DatasetRecord(
+                    dataset_id=fixture["dataset_id"],
+                    time=date(2024, 6, 20),
+                    lat=21.0,
+                    lon=90.0,
+                    parameter=_PARAM,
+                    value=42.0,
+                    unit="°C",
+                    quality_flag="normal",
+                    geom="SRID=4326;POINT(90.0 21.0)",
+                )
+            )
+            await db.commit()
+
+        r2 = await client.post(
+            "/api/v1/visualize/coverage", json={"dataset_id": dataset_id, "parameter": _PARAM}
+        )
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["matching_count"] == first["matching_count"]
 
 
 class TestBoundaryShapefiles:

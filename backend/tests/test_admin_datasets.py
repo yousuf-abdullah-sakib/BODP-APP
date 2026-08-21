@@ -3,9 +3,11 @@ import uuid
 import pytest
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.core.database import AsyncSessionLocal
 from app.models.catalog import Dataset, DatasetCategory, DatasetFile, DatasetStatus, StorageBackend
 from app.models.requests import AccessGrant, GrantStatus
+from app.services.storage.keys import snapshot_key
 from tests.conftest import register_verified_user
 
 pytestmark = pytest.mark.asyncio
@@ -320,3 +322,12 @@ class TestPermanentDelete:
         assert r.status_code == 204
         assert ("bodp-raw", "raw/test/raw.csv") in deleted_calls
         assert ("bodp-processed", "processed/test/raw.parquet") in deleted_calls
+        # Real gap found and fixed: the Dataset Default-View Snapshot
+        # (snapshots/{dataset_id}/snapshot.json, Visualize Performance
+        # plan Phase 1) lives outside the per-DatasetFile loop above — a
+        # live check against a real deleted dataset confirmed this key
+        # was NOT being cleaned up before this fix. Deleted unconditionally
+        # (idempotent even if no snapshot was ever generated for this
+        # dataset), so the call must happen regardless of whether a
+        # snapshot actually exists.
+        assert (settings.STORAGE_VPS_BUCKET, snapshot_key(uuid.UUID(dataset_id))) in deleted_calls

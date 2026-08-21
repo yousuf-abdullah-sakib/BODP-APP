@@ -21,6 +21,12 @@ _LON_NAMES = ("lon", "long", "longitude", "x")
 # ERA5_Wind_Monthly_2010_2024.nc) would otherwise have no detected time
 # coordinate at all despite genuinely having one.
 _TIME_NAMES = ("time", "date", "datetime", "valid_time")
+# Oceanographic Profiles module: vertical-coordinate detection. Only matched
+# against ds.coords (like lat/lon/time above), never ds.dims alone — a
+# dataset can have a "depth" dimension with no matching 1-D coordinate
+# variable, which _find_coord correctly leaves undetected rather than
+# guessing.
+_DEPTH_NAMES = ("depth", "depth_m", "z", "level", "pressure")
 
 # Chunk-axis strategy: chunk along the detected time dimension when one
 # exists (matches the stated preference for oceanographic/model data,
@@ -90,6 +96,7 @@ class NetcdfParser(FileParser):
         lat_name = _find_coord(ds, _LAT_NAMES)
         lon_name = _find_coord(ds, _LON_NAMES)
         time_name = _find_coord(ds, _TIME_NAMES)
+        depth_name = _find_coord(ds, _DEPTH_NAMES)
 
         # Coordinate arrays are always tiny relative to the full dataset
         # (a lat/lon/time axis, not the gridded data itself) — .values
@@ -111,6 +118,15 @@ class NetcdfParser(FileParser):
                 temporal_start = pd.Timestamp(time_values.min()).date()
                 temporal_end = pd.Timestamp(time_values.max()).date()
 
+        depth_min = depth_max = None
+        depth_convention = None
+        if depth_name is not None:
+            depth_values = ds[depth_name].values
+            if depth_values.size > 0:
+                depth_min = float(np.nanmin(depth_values))
+                depth_max = float(np.nanmax(depth_values))
+                depth_convention = "assumed_positive_down" if depth_min >= 0 else "assumed_negative_up"
+
         dimensions = {str(k): int(v) for k, v in ds.sizes.items()}
         record_count = _total_elements(dimensions)
         shape = DataShape.GRIDDED if _is_gridded(ds, time_name=time_name) else DataShape.TABULAR
@@ -131,6 +147,10 @@ class NetcdfParser(FileParser):
                 "lat_col": lat_name,
                 "lon_col": lon_name,
                 "time_col": time_name,
+                "depth_col": depth_name,
+                "depth_min": depth_min,
+                "depth_max": depth_max,
+                "depth_convention": depth_convention,
             },
         )
 

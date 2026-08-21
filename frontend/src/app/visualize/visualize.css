@@ -116,6 +116,7 @@
 .legend-gradient-rdbu{background:linear-gradient(to right,#b2182b,#ef8a62,#f7f7f7,#67a9cf,#2166ac)}
 .legend-gradient-ylorrd{background:linear-gradient(to right,#ffffb2,#fecc5c,#fd8d3c,#f03b20,#bd0026)}
 .legend-gradient-blues{background:linear-gradient(to right,#f7fbff,#c6dbef,#6baed6,#2171b5,#08306b)}
+.legend-gradient-greenyellowred{background:linear-gradient(to right,#1a9850,#a6d96a,#ffffbf,#fdae61,#a50026)}
 .legend-swatches{display:flex;flex-direction:column;gap:0.3rem}
 .legend-swatch{color:#fff;font-size:0.68rem;font-weight:700;text-align:center;padding:0.3rem;border-radius:5px;text-shadow:0 1px 2px rgba(0,0,0,0.5)}
 

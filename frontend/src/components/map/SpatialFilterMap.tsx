@@ -17,6 +17,15 @@ interface SpatialFilterMapProps {
   stations?: StationOption[];
   /** Enables the polygon draw tool alongside rectangle. Off by default to keep existing rectangle-only consumers unchanged. */
   enablePolygon?: boolean;
+  /**
+   * Programmatically draws this shape onto the map's draw layer (e.g. an
+   * uploaded Custom Boundary), the same layer/styling a hand-drawn AOI
+   * uses, and fits the view to it — a one-way sync from parent state to
+   * the map, never fed back through onAoiChange (the caller already
+   * knows this value; only genuine hand-drawing should trigger
+   * onAoiChange). Ignored when null/omitted.
+   */
+  externalAoi?: SpatialAOI | null;
 }
 
 export default function SpatialFilterMap({
@@ -24,6 +33,7 @@ export default function SpatialFilterMap({
   clearSignal,
   stations = [],
   enablePolygon = false,
+  externalAoi = null,
 }: SpatialFilterMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -110,6 +120,32 @@ export default function SpatialFilterMap({
       drawLayerRef.current.clearLayers();
     }
   }, [clearSignal]);
+
+  useEffect(() => {
+    if (!externalAoi || !mapRef.current || !drawLayerRef.current) return;
+    drawLayerRef.current.clearLayers();
+    // "geometry" (an uploaded Custom Boundary) renders via Leaflet's own
+    // GeoJSON handling -- every feature, every Polygon/MultiPolygon
+    // part, every interior hole, exactly as parsed, not reconstructed
+    // from a single ring. L.GeoJSON, L.Polygon, and L.Rectangle all
+    // implement getBounds() (just not through a common Leaflet type),
+    // which is all this effect needs from whichever one gets built.
+    const layer: L.Layer & { getBounds(): L.LatLngBounds } =
+      externalAoi.kind === "geometry"
+        ? L.geoJSON(externalAoi.geojson, { style: { color: "#0f766e", weight: 2 } })
+        : externalAoi.kind === "polygon"
+          ? L.polygon(externalAoi.ring, { color: "#0f766e", weight: 2 })
+          : L.rectangle(
+              [
+                [externalAoi.bounds.latMin, externalAoi.bounds.lonMin],
+                [externalAoi.bounds.latMax, externalAoi.bounds.lonMax],
+              ],
+              { color: "#0f766e", weight: 2 }
+            );
+    drawLayerRef.current.addLayer(layer);
+    const bounds = layer.getBounds();
+    if (bounds.isValid()) mapRef.current.fitBounds(bounds, { padding: [20, 20] });
+  }, [externalAoi]);
 
   return <div id="spatialMap" ref={containerRef} />;
 }

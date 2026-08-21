@@ -188,8 +188,16 @@ async def _get_request_with_relations(db: AsyncSession, request_id: uuid.UUID) -
         .options(
             selectinload(DatasetRequest.dataset).selectinload(Dataset.category),
             selectinload(DatasetRequest.user),
+            selectinload(DatasetRequest.supporting_document),
         )
         .where(DatasetRequest.id == request_id)
+        # populate_existing(): this request_id may already be in the
+        # session's identity map (e.g. create_request loaded it earlier
+        # in the same request/session, before a supporting document was
+        # linked to it) — without this, SQLAlchemy returns the
+        # already-mapped object as-is and skips re-populating relationship
+        # attributes that were already marked "loaded" (as None) on it.
+        .execution_options(populate_existing=True)
     )
     request = result.scalar_one_or_none()
     if request is None:
@@ -285,7 +293,10 @@ async def list_requests_for_user(
 ) -> list[DatasetRequest]:
     query = (
         select(DatasetRequest)
-        .options(selectinload(DatasetRequest.dataset).selectinload(Dataset.category))
+        .options(
+            selectinload(DatasetRequest.dataset).selectinload(Dataset.category),
+            selectinload(DatasetRequest.supporting_document),
+        )
         .where(DatasetRequest.user_id == user_id)
         .order_by(DatasetRequest.submitted_at.desc())
     )
@@ -329,6 +340,7 @@ async def list_requests_for_admin(
         .options(
             selectinload(DatasetRequest.dataset).selectinload(Dataset.category),
             selectinload(DatasetRequest.user),
+            selectinload(DatasetRequest.supporting_document),
         )
         .order_by(DatasetRequest.submitted_at.desc())
     )

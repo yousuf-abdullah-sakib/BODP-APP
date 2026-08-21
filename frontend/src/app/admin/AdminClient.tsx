@@ -21,6 +21,7 @@ import GrantsSection from "./sections/GrantsSection";
 import MediaLibrarySection from "./sections/MediaLibrarySection";
 import OverviewSection from "./sections/OverviewSection";
 import ReportsSection from "./sections/ReportsSection";
+import BackupRecoverySection from "./sections/BackupRecoverySection";
 import RolesPermissionsSection from "./sections/RolesPermissionsSection";
 import SettingsSection from "./sections/SettingsSection";
 import SiteContentSection from "./sections/SiteContentSection";
@@ -108,6 +109,10 @@ export default function AdminClient() {
         { key: "support-tickets", label: "Support Tickets", icon: "🎫" },
       ],
     },
+    {
+      title: "Operations",
+      items: [{ key: "backups", label: "Backups & Recovery", icon: "💾" }],
+    },
   ];
 
   return (
@@ -144,6 +149,7 @@ export default function AdminClient() {
       {active === "content" && <SiteContentSection />}
       {active === "analytics" && <AnalyticsSection />}
       {active === "reports" && <ReportsSection />}
+      {active === "backups" && <BackupRecoverySection />}
       {active === "audit" && <AuditLogSection />}
       {active === "settings" && <SettingsSection />}
       {active === "contact" && <ContactMessagesSection />}

@@ -5,7 +5,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { colorForValue, rampColor, classifyValue, classifyByBreakpoints, type ColorRampName, type InterpolationDisplayMode } from "@/lib/geo/colorRamp";
 import { pointInFeatureCollection } from "@/lib/geo/shapefileUpload";
-import type { SpatialBounds, SpatialAOI } from "@/lib/geo/spatialAoi";
+import { boundsOf, type SpatialBounds, type SpatialAOI } from "@/lib/geo/spatialAoi";
 import type { SpatialGrid } from "@/lib/types/visualize";
 
 export interface GisPoint {
@@ -13,11 +13,14 @@ export interface GisPoint {
   lat: number;
   lon: number;
   value: number;
-  sizeValue: number;
 }
 
 export type InterpolationOutput = "contour" | "heatmap" | "points-only";
 export type BaseMapName = "light" | "dark" | "satellite" | "terrain";
+
+// Fixed marker radius (px) for every spatial observation point — value is
+// conveyed by color alone (colorForValue below), never by size.
+const POINT_MARKER_RADIUS = 6;
 
 const TILE_LAYERS: Record<BaseMapName, { url: string; maxZoom: number }> = {
   light: { url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", maxZoom: 19 },
@@ -80,10 +83,15 @@ function pointInPolygonRing(lat: number, lon: number, ring: [number, number][]):
 
 function aoiContains(aoi: SpatialAOI, lat: number, lon: number): boolean {
   if (aoi.kind === "rectangle") return boundsContains(aoi.bounds, lat, lon);
+  if (aoi.kind === "geometry") return pointInFeatureCollection(lat, lon, aoi.geojson);
   return pointInPolygonRing(lat, lon, aoi.ring);
 }
 
-function aoiToLatLngs(aoi: SpatialAOI): L.LatLngExpression[] {
+// Only used for the rectangle/polygon kinds -- an uploaded "geometry"
+// AOI is rendered directly via L.geoJSON in the effect below instead
+// (multiple features/parts/holes can't be flattened into one ring
+// without losing them, exactly the bug this whole fix addresses).
+function aoiToLatLngs(aoi: { kind: "rectangle"; bounds: SpatialBounds } | { kind: "polygon"; ring: [number, number][] }): L.LatLngExpression[] {
   if (aoi.kind === "rectangle") {
     const { latMin, latMax, lonMin, lonMax } = aoi.bounds;
     return [
@@ -94,13 +102,6 @@ function aoiToLatLngs(aoi: SpatialAOI): L.LatLngExpression[] {
     ];
   }
   return aoi.ring;
-}
-
-function aoiBoundingBox(aoi: SpatialAOI): SpatialBounds {
-  if (aoi.kind === "rectangle") return aoi.bounds;
-  const lats = aoi.ring.map((p) => p[0]);
-  const lons = aoi.ring.map((p) => p[1]);
-  return { latMin: Math.min(...lats), latMax: Math.max(...lats), lonMin: Math.min(...lons), lonMax: Math.max(...lons) };
 }
 
 export default function GisSpatialMap({
@@ -128,7 +129,7 @@ export default function GisSpatialMap({
   const tileLayerRef = useRef<L.TileLayer | null>(null);
   const baseBoundaryRef = useRef<L.GeoJSON | null>(null);
   const uploadedBoundaryRef = useRef<L.GeoJSON | null>(null);
-  const aoiLayerRef = useRef<L.Polygon | null>(null);
+  const aoiLayerRef = useRef<L.Polygon | L.GeoJSON | null>(null);
   const pointsLayerRef = useRef<L.LayerGroup | null>(null);
   const overlayRef = useRef<L.ImageOverlay | null>(null);
   const boundaryDataRef = useRef<GeoJSON.FeatureCollection | null>(null);
@@ -269,13 +270,21 @@ export default function GisSpatialMap({
       aoiLayerRef.current = null;
     }
     if (aoi) {
-      const shape = L.polygon(aoiToLatLngs(aoi), {
-        color: "#ea580c",
-        weight: 2,
-        fillColor: "#ea580c",
-        fillOpacity: 0.06,
-        dashArray: "6 4",
-      }).addTo(map);
+      // "geometry" (an uploaded Custom Boundary) renders via Leaflet's
+      // own GeoJSON handling -- every feature/Polygon/MultiPolygon
+      // part/hole exactly as parsed, not flattened into one ring.
+      const shape =
+        aoi.kind === "geometry"
+          ? L.geoJSON(aoi.geojson, {
+              style: { color: "#ea580c", weight: 2, fillColor: "#ea580c", fillOpacity: 0.06, dashArray: "6 4" },
+            }).addTo(map)
+          : L.polygon(aoiToLatLngs(aoi), {
+              color: "#ea580c",
+              weight: 2,
+              fillColor: "#ea580c",
+              fillOpacity: 0.06,
+              dashArray: "6 4",
+            }).addTo(map);
       aoiLayerRef.current = shape;
     }
   }, [aoi]);
@@ -289,16 +298,17 @@ export default function GisSpatialMap({
     const values = points.map((p) => p.value);
     const min = Math.min(...values);
     const max = Math.max(...values);
-    const sizeValues = points.map((p) => p.sizeValue);
-    const sizeMin = Math.min(...sizeValues);
-    const sizeMax = Math.max(...sizeValues);
 
     points.forEach((p) => {
       const color = colorForValue(p.value, min, max, ramp);
-      const sizeT = sizeMax === sizeMin ? 0.5 : (p.sizeValue - sizeMin) / (sizeMax - sizeMin);
-      const radius = 6 + sizeT * 14;
+      // Visualization Module audit fix (Spatial Mapping — Point Markers):
+      // every valid observation renders as a uniform, fixed-size point —
+      // marker radius previously scaled with the data value (6-20px),
+      // redundantly double-encoding the same value color already
+      // conveys. Color/value logic, coordinates, and filtering are
+      // unchanged; only the radius is now constant.
       L.circleMarker([p.lat, p.lon], {
-        radius,
+        radius: POINT_MARKER_RADIUS,
         color: "#1e293b",
         weight: 1,
         fillColor: color,
@@ -336,7 +346,7 @@ export default function GisSpatialMap({
     const imageData = ctx.createImageData(size, size);
 
     const boundary = uploadedBoundary ?? boundaryDataRef.current;
-    const aoiBox = aoi ? aoiBoundingBox(aoi) : null;
+    const aoiBox = aoi ? boundsOf(aoi) : null;
 
     for (let row = 0; row < size; row++) {
       for (let col = 0; col < size; col++) {
@@ -365,7 +375,18 @@ export default function GisSpatialMap({
         imageData.data[idx] = rgb[0];
         imageData.data[idx + 1] = rgb[1];
         imageData.data[idx + 2] = rgb[2];
-        imageData.data[idx + 3] = interpolationOutput === "contour" ? 200 : 235;
+        // Visualization Module audit fix (Spatial Mapping — Interpolation
+        // Raster): valid cells are now fully opaque at the pixel level
+        // (255) — compute_interpolation always returns a real finite
+        // value for every in-bounds cell (verified: _idw's np.divide has
+        // a zero-fallback `out`, _nearest's NearestNDInterpolator always
+        // resolves within the grid's own extent), so there is no NoData
+        // case to represent here; NoData/outside-AOI cells are already
+        // handled by the alpha=0 branch above. The user's opacity slider
+        // (interpolationOpacity, applied at the Leaflet imageOverlay
+        // level below) is now the ONLY opacity control — this per-pixel
+        // alpha no longer silently caps it at 78-92%.
+        imageData.data[idx + 3] = 255;
       }
     }
     ctx.putImageData(imageData, 0, 0);

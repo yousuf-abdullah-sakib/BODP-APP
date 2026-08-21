@@ -174,7 +174,27 @@ def _materialize_zarr_to_parquet(dataset_file: DatasetFile, output_path: Path, s
     completely unmodified, exactly as they already do for a real
     PARQUET-backed file's processed object. Filtering BEFORE flattening
     (not after) is what keeps this from ever pulling an unfiltered whole
-    grid into memory for a large source."""
+    grid into memory for a large source.
+
+    Scope fields deliberately NOT applied here, and why (Data Page Filter
+    & Extraction Audit, high #3 — stated explicitly rather than left as a
+    silent gap, mirroring gridded_query_service.py's identical rationale
+    for the live-preview path against the same CHUNKED_ARRAY files):
+    - quality/source/platform/station/format/processing_level: per-
+      observation tabular metadata columns that only exist because
+      ingestion.py's _write_dataset_records adds them when building a
+      tidy DatasetRecord row — a Zarr store has coordinates + data
+      variables, never these columns, so there is nothing to filter
+      against. Genuinely inapplicable, not merely unimplemented.
+    - depth_min/depth_max: every CHUNKED_ARRAY file in this system today
+      is (lat, lon, time)-indexed only — verified directly, no real Zarr
+      dataset has a depth coordinate — so there is no depth axis to slice
+      against. Would need to become a real .sel()-style filter (matching
+      the date_from/date_to pattern above) the day a depth-resolved
+      gridded dataset is actually ingested; silently doing nothing today
+      is correct only because that axis genuinely doesn't exist yet.
+    date_from/date_to, bounds, and parameters (applied below) are the
+    only scope fields with a genuine per-cell analog for gridded data."""
     from app.services.gridded_query_service import open_zarr_dataset
 
     with open_zarr_dataset(dataset_file) as ds:

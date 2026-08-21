@@ -101,6 +101,19 @@ class RequestUserSummary(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class SupportingDocumentSummary(BaseModel):
+    """Only what a consumer needs to know a document exists and fetch it —
+    never the storage backend/bucket/key (see RequestSupportingDocument's
+    own storage_* columns, which are not exposed here)."""
+
+    id: uuid.UUID
+    original_filename: str
+    content_type: str
+    file_size_bytes: int
+
+    model_config = {"from_attributes": True}
+
+
 class RequestSummary(BaseModel):
     """A single request as seen by its own submitter (GET /me/requests)."""
 
@@ -112,6 +125,7 @@ class RequestSummary(BaseModel):
     submitted_at: datetime
     reviewed_at: datetime | None
     admin_note: str | None
+    supporting_document: SupportingDocumentSummary | None = None
 
     model_config = {"from_attributes": True}
 

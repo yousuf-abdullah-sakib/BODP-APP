@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ColorRampName } from "@/lib/geo/colorRamp";
 
-const RAMP_OPTIONS: ColorRampName[] = ["Viridis", "Plasma", "RdBu", "YlOrRd", "Blues"];
+const RAMP_OPTIONS: ColorRampName[] = ["Viridis", "Plasma", "RdBu", "YlOrRd", "Blues", "GreenYellowRed"];
 
 interface ColorRampSelectProps {
   value: ColorRampName;

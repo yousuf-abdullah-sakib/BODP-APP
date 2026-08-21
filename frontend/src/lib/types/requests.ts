@@ -41,6 +41,13 @@ export interface RequestUserSummary {
   institution: string | null;
 }
 
+export interface SupportingDocumentSummary {
+  id: string;
+  original_filename: string;
+  content_type: string;
+  file_size_bytes: number;
+}
+
 export interface RequestSummary {
   id: string;
   dataset: RequestDatasetSummary;
@@ -50,6 +57,7 @@ export interface RequestSummary {
   submitted_at: string;
   reviewed_at: string | null;
   admin_note: string | null;
+  supporting_document?: SupportingDocumentSummary | null;
 }
 
 export interface RequestDetail extends RequestSummary {

@@ -6,6 +6,7 @@ from app.services.storage.keys import (
     previews_key,
     processed_key,
     raw_key,
+    snapshot_key,
 )
 from app.services.storage.registry import get_storage_backend
 
@@ -20,4 +21,5 @@ __all__ = [
     "previews_key",
     "avatar_key",
     "media_key",
+    "snapshot_key",
 ]

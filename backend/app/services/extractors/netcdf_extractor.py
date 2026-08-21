@@ -21,7 +21,24 @@ def _find_coord(ds: xr.Dataset, names: tuple[str, ...]) -> str | None:
 class NetcdfExtractor(Extractor):
     """Reads the dataset's RAW original NetCDF (not the flattened processed
     Parquet) so N-D structure is preserved through the filter — the whole
-    point of offering a NetCDF output format instead of just CSV/Parquet."""
+    point of offering a NetCDF output format instead of just CSV/Parquet.
+
+    Scope fields NOT applied here (Data Page Filter & Extraction Audit,
+    high #4 — output-format consistency means every field that COULD
+    apply does, not that every field is fabricated where it can't):
+    quality/source/platform/station/format/processing_level are added by
+    ingestion.py's _write_dataset_records when it builds the tidy
+    DatasetRecord/processed-Parquet row — they never exist in the RAW
+    source file this extractor deliberately reads instead (see the module
+    docstring above and _source_for_format's docstring in extraction.py),
+    so there is no column to filter against, for ANY source file, not
+    just gridded ones. Choosing CSV/Parquet output for the same request
+    applies these fields because that path reads the enriched processed
+    Parquet, not because NetCDF output is missing a feature — the two
+    paths read genuinely different data. date_from/date_to, bounds, and
+    parameters (applied below) are universal: every real NetCDF file has
+    time/lat/lon coordinates and named data variables, regardless of
+    whether it went through ingestion's enrichment."""
 
     output_format = "netcdf"
 
@@ -69,9 +86,20 @@ class NetcdfExtractor(Extractor):
                     (lon_vals >= bounds["lon_min"]) & (lon_vals <= bounds["lon_max"]), drop=True
                 )
 
-        parameter = scope.get("parameter")
-        if parameter:
-            matching = [v for v in ds.data_vars if v.lower() == str(parameter).lower()]
+        # Data Page Filter & Extraction Audit fix (critical #2): the
+        # stored scope field is always "parameters" (plural, a list — see
+        # SearchCriteriaSchema.parameters and scope_filter.apply_scope_
+        # mask's identical read) — "parameter" (singular) was never a real
+        # key in any stored scope, so this was a permanent no-op that
+        # silently included every variable regardless of what the user
+        # selected. Selects every data_var matching ANY requested
+        # parameter (case-insensitive), not just the first — the tabular
+        # equivalent (apply_scope_mask) is membership-match, not
+        # single-value, and NetCDF's "parameters" ARE its variable names.
+        parameters = scope.get("parameters")
+        if parameters:
+            lowered = {str(p).lower() for p in parameters}
+            matching = [v for v in ds.data_vars if str(v).lower() in lowered]
             if matching:
                 ds = ds[matching]
 

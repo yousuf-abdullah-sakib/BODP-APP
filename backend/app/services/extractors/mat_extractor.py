@@ -42,7 +42,16 @@ class MatExtractor(Extractor):
     ingestion time (app/services/parsers/mat_parser.py) — any variable that
     doesn't share that common length (e.g. a genuinely N-D grid) is passed
     through unfiltered rather than dropped or errored, since there's no
-    single row-count for it to be filtered against."""
+    single row-count for it to be filtered against.
+
+    Reads the RAW original .mat file, same reasoning and same scope-field
+    coverage as NetcdfExtractor (see that class's docstring, Data Page
+    Filter & Extraction Audit high #4): quality/source/platform/station/
+    format/processing_level/parameters are processed-Parquet-only columns
+    added by ingestion, never present in a raw file's variables — no bug,
+    genuinely absent data. date_from/date_to and bounds (applied below)
+    are the fields with a real analog here, matched by variable-name alias
+    the same way MatParser detects them at ingestion time."""
 
     output_format = "mat"
 

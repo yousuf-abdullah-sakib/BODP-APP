@@ -69,6 +69,18 @@ def previews_key(dataset_id: uuid.UUID | str, filename: str = "thumbnail.png") -
     return f"previews/{dataset_id}/{sanitize_filename(filename)}"
 
 
+def snapshot_key(dataset_id: uuid.UUID | str) -> str:
+    """Key for a dataset's precomputed default-view snapshot (Dataset
+    Default-View Snapshot feature) — a small JSON blob (sample rows +
+    DatasetVariable stats + one default chart) regenerated on every
+    successful ingestion, whose freshness is tracked by
+    Dataset.snapshot_version vs Dataset.version, never by a version
+    number baked into the key itself: overwriting the same key each
+    regeneration is intentional (a stale object is never orphaned or
+    read once its pointer column no longer matches)."""
+    return f"snapshots/{dataset_id}/snapshot.json"
+
+
 def avatar_key(user_id: uuid.UUID | str, filename: str) -> str:
     """Key for a user's profile avatar image. Stored as a bare object key
     (like every other *_key column), never a full URL — the frontend
@@ -78,8 +90,33 @@ def avatar_key(user_id: uuid.UUID | str, filename: str) -> str:
     return f"avatars/{user_id}/{sanitize_filename(filename)}"
 
 
+def supporting_document_key(
+    request_id: uuid.UUID | str, document_id: uuid.UUID | str, original_name: str
+) -> str:
+    """Key for a user-uploaded Data Request supporting document (PDF/DOC/
+    DOCX). Private — never served from a public bucket/prefix, only via a
+    presigned URL issued to an authorized admin. Keyed by both the owning
+    request and the document's own id (not just the sanitized filename) so
+    the key is non-guessable even if two requests upload identically named
+    files."""
+    return f"supporting-documents/{request_id}/{document_id}_{sanitize_filename(original_name)}"
+
+
 def media_key(media_id: uuid.UUID | str, filename: str) -> str:
     """Key for a Media Library asset (Master Plan §3 Phase 9) — the single
     source of truth for blog featured images, about-team photos, and any
     other admin-uploaded content asset. Public-readable, like avatars."""
     return f"media/{media_id}/{sanitize_filename(filename)}"
+
+
+def backup_key(backup_id: uuid.UUID | str, kind: str = "pg_dump") -> str:
+    """Key for a point-in-time recoverable backup artifact (Master Plan
+    §3 Phase 10 task 4). `kind` distinguishes the Postgres dump from a
+    future object-storage-tier backup, both segregated under this same
+    prefix by kind rather than a separate top-level prefix, since both
+    are the same operational concept (a recoverable artifact) at
+    different scope. Private — like supporting-documents/, never served
+    from a public bucket/prefix; only presigned, and with a shorter
+    expiry than most other presigned downloads, since a backup dump
+    contains full production data."""
+    return f"backups/{backup_id}/{kind}.dump"

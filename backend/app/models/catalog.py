@@ -133,6 +133,17 @@ class Dataset(UUIDPKMixin, TimestampMixin, Base):
     schema_reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL")
     )
+    # Default-View Snapshot feature: which `version` (above) the currently
+    # stored snapshot object (storage/keys.py's snapshot_key) was built
+    # from. NULL means no snapshot has ever been generated. A read
+    # endpoint trusts the stored snapshot only when this equals `version`
+    # exactly — any mismatch means a content-changing ingestion has
+    # happened since the snapshot was built, so it's treated as stale and
+    # the caller falls back to the live query path unchanged. Set only by
+    # worker/tasks/snapshots.py, only after the snapshot object has been
+    # durably written to storage (never before — an in-flight write must
+    # never be pointed to by a "fresh" version number).
+    snapshot_version: Mapped[int | None] = mapped_column(nullable=True)
 
     category: Mapped["DatasetCategory | None"] = relationship(back_populates="datasets")
     files: Mapped[list["DatasetFile"]] = relationship(

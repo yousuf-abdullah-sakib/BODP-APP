@@ -26,12 +26,53 @@ from app.services.parsers.mat_gridded_struct import (
 _LAT_NAMES = ("lat", "latitude", "y")
 _LON_NAMES = ("lon", "long", "longitude", "x")
 _TIME_NAMES = ("time", "date", "datetime", "t")
+_DEPTH_NAMES = ("depth", "depth_m", "depth_meters", "pressure_depth")
 
 # Row-slice size for streaming a v7.3 (HDF5) .mat variable during
 # to_processed() — mirrors csv_parser.py's chunksize, keeping at most this
 # many rows of ALL tabular variables in memory at once, never the full
 # variable.
 _MAT_CHUNK_ROWS = 100_000
+
+
+def _find_time_key(column_names: list[str]) -> str | None:
+    lowered = {k.lower(): k for k in column_names}
+    return next((lowered[name] for name in _TIME_NAMES if name in lowered), None)
+
+
+def _convert_datenum_time_column(tabular: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """MATLAB stores dates as datenum (days since year 0, proleptic) —
+    scipy.io.loadmat/h5py read that back as a plain float array with no
+    indication it represents a date, so a tabular .mat file's genuine
+    time column was previously written to the wide Parquet file as a raw
+    number with zero conversion (confirmed real bug: this crashed a real
+    dataset's date-range queries downstream with "Conversion Error:
+    Unimplemented type for cast (DOUBLE -> TIMESTAMP)", since nothing
+    ever treated the value as an epoch/duration to convert). This mirrors
+    _extract_metadata's own already-correct datenum handling for
+    temporal_start/temporal_end (same formula, via the shared
+    datenum_to_datetime helper) — that metadata was always right, only
+    the actual per-row column value written to Parquet was not.
+
+    Detected the same way _extract_metadata identifies the time column
+    (name match against _TIME_NAMES) plus is_plausible_datenum's
+    already-established numeric range heuristic, so a numeric column
+    that merely happens to be named "time"/"t"/etc. but isn't in a real
+    date's datenum range (e.g. a row index or elapsed-seconds axis) is
+    left completely untouched rather than being coerced into a bogus
+    date."""
+    time_key = _find_time_key(list(tabular.keys()))
+    if time_key is None:
+        return tabular
+    try:
+        values = np.asarray(tabular[time_key], dtype=float)
+    except (TypeError, ValueError):
+        return tabular
+    if not is_plausible_datenum(values):
+        return tabular
+    converted = dict(tabular)
+    converted[time_key] = datenum_to_datetime(values).to_numpy()
+    return converted
 
 
 def _squeezable_length(shape: tuple[int, ...]) -> int | None:
@@ -133,15 +174,24 @@ class MatParser(FileParser):
             return np.asarray(variables[key]).ravel() if key is not None else None
 
         lat_key, lon_key, time_key = find_key(_LAT_NAMES), find_key(_LON_NAMES), find_key(_TIME_NAMES)
+        depth_key = find_key(_DEPTH_NAMES)
         lat_values = find(_LAT_NAMES)
         lon_values = find(_LON_NAMES)
         time_values = find(_TIME_NAMES)
+        depth_values = find(_DEPTH_NAMES)
 
         lat_min = lat_max = lon_min = lon_max = None
         if lat_values is not None and lat_values.size > 0:
             lat_min, lat_max = float(np.nanmin(lat_values)), float(np.nanmax(lat_values))
         if lon_values is not None and lon_values.size > 0:
             lon_min, lon_max = float(np.nanmin(lon_values)), float(np.nanmax(lon_values))
+
+        depth_min = depth_max = None
+        if depth_values is not None and depth_values.size > 0:
+            depth_min, depth_max = float(np.nanmin(depth_values)), float(np.nanmax(depth_values))
+        depth_convention = None
+        if depth_key is not None and depth_min is not None:
+            depth_convention = "assumed_positive_down" if depth_min >= 0 else "assumed_negative_up"
 
         temporal_start = temporal_end = None
         if time_values is not None and time_values.size > 0:
@@ -169,7 +219,15 @@ class MatParser(FileParser):
             temporal_start=temporal_start,
             temporal_end=temporal_end,
             record_count=record_count,
-            extra={"lat_col": lat_key, "lon_col": lon_key, "time_col": time_key},
+            extra={
+                "lat_col": lat_key,
+                "lon_col": lon_key,
+                "time_col": time_key,
+                "depth_col": depth_key,
+                "depth_min": depth_min,
+                "depth_max": depth_max,
+                "depth_convention": depth_convention,
+            },
         )
 
     def _extract_gridded_metadata(self, gridded: GriddedStructField) -> ParsedFileMetadata:
@@ -264,6 +322,7 @@ class MatParser(FileParser):
         if not tabular:
             raise ParserError("No variables share a common row count for tabular conversion")
 
+        tabular = _convert_datenum_time_column(tabular)
         df = pd.DataFrame(tabular)
         df.to_parquet(output_path, index=False)
         return ProcessedArtifact(
@@ -353,11 +412,34 @@ class MatParser(FileParser):
                 writer: pq.ParquetWriter | None = None
                 row_count = 0
 
+                # Determine once (not per-chunk) whether this file's time
+                # column is a real MATLAB datenum axis — plausibility is a
+                # property of the whole column, and re-checking a growing
+                # per-chunk slice could disagree across chunks and produce
+                # an inconsistent Parquet schema between chunk writes. The
+                # time column itself is always small/1-D, so reading it in
+                # full up front doesn't reintroduce the whole-file memory
+                # cost this chunked path exists to avoid (see
+                # _convert_datenum_time_column's docstring for why this
+                # conversion is needed at all).
+                time_key = _find_time_key(col_names)
+                convert_time = False
+                if time_key is not None:
+                    try:
+                        full_time_values = np.asarray(tabular[time_key][()], dtype=float).ravel()
+                    except (TypeError, ValueError):
+                        full_time_values = None
+                    convert_time = full_time_values is not None and is_plausible_datenum(full_time_values)
+
                 for start in range(0, common_length, _MAT_CHUNK_ROWS):
                     end = min(start + _MAT_CHUNK_ROWS, common_length)
                     chunk_columns = {
                         name: np.asarray(tabular[name][start:end]).ravel() for name in col_names
                     }
+                    if convert_time:
+                        chunk_columns[time_key] = datenum_to_datetime(
+                            chunk_columns[time_key].astype(float)
+                        ).to_numpy()
                     table = pa.table(chunk_columns)
                     if writer is None:
                         writer = pq.ParquetWriter(output_path, table.schema)

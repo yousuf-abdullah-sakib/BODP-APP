@@ -149,6 +149,38 @@ class TestLogin:
         )
         assert r.status_code == 429
 
+    async def test_login_lockout_blocks_continued_wrong_password_attempts(self, client):
+        """Phase 10 security audit finding: the sibling test above only
+        ever verifies lockout via a CORRECT-password 6th attempt, which
+        accidentally passed even when _is_locked_out was checked AFTER
+        password verification in authenticate() — a real bug, since that
+        ordering made the lockout check unreachable from the actual
+        attack scenario (an attacker who keeps guessing WRONG passwords,
+        never a correct one). This test exercises that real scenario
+        directly: attempt 6 with the SAME wrong password used for 1-5
+        must also be locked out, not just a correct-password attempt."""
+        await _register_and_verify(client)
+        for _ in range(5):
+            r = await client.post(
+                "/api/v1/auth/login",
+                json={"email": REGISTER_PAYLOAD["email"], "password": "wrong-password"},
+            )
+            assert r.status_code == 401
+
+        r = await client.post(
+            "/api/v1/auth/login",
+            json={"email": REGISTER_PAYLOAD["email"], "password": "wrong-password"},
+        )
+        assert r.status_code == 429
+        # A 7th attempt, even with the correct password, must also stay
+        # locked out — the lockout is time-window-based, not a one-shot
+        # check that a subsequent correct guess could slip past.
+        r = await client.post(
+            "/api/v1/auth/login",
+            json={"email": REGISTER_PAYLOAD["email"], "password": REGISTER_PAYLOAD["password"]},
+        )
+        assert r.status_code == 429
+
     async def test_suspended_account_cannot_login(self, client):
         await _register_and_verify(client)
         async with AsyncSessionLocal() as db:

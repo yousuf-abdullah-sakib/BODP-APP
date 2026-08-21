@@ -9,14 +9,14 @@ import { useFullscreenChart, FullscreenButton, FullscreenOverlay } from "@/compo
 import { parseShapefile } from "@/lib/geo/shapefileUpload";
 import { equalIntervalBreaks, type ColorRampName, type InterpolationDisplayMode } from "@/lib/geo/colorRamp";
 import type { InterpolationOutput, BaseMapName, GisMapApi } from "@/components/map/GisSpatialMap";
-import type { SpatialAOI } from "@/lib/geo/spatialAoi";
+import { boundsOf, type SpatialAOI } from "@/lib/geo/spatialAoi";
 import { useToast } from "@/context/ToastContext";
 import { ApiError } from "@/lib/api/client";
 import { postSpatial, getSpatialJob } from "@/lib/api/visualize";
 import { getDefaultBoundary } from "@/lib/api/boundary";
 import { toVizFilterParams, type VizFilters } from "../useVizFilters";
 import { useVizExportSettings } from "../useVizExportSettings";
-import type { InterpolationMethod, SpatialGrid, SpatialPoint } from "@/lib/types/visualize";
+import type { InterpolationMethod, SpatialGrid, SpatialPoint, VisualizableDatasetSummary } from "@/lib/types/visualize";
 import type { Data } from "plotly.js";
 
 const GisSpatialMap = dynamic(() => import("@/components/map/GisSpatialMap"), {
@@ -60,9 +60,10 @@ interface UseSpatialMappingArgs {
   parameter: string;
   aoi: SpatialAOI | null;
   filters: VizFilters;
+  selectedDataset?: VisualizableDatasetSummary | null;
 }
 
-export function useSpatialMapping({ parameter, aoi, filters }: UseSpatialMappingArgs) {
+export function useSpatialMapping({ parameter, aoi, filters, selectedDataset }: UseSpatialMappingArgs) {
   const { toast } = useToast();
   const exportsEnabled = useVizExportSettings();
   const [defaultBoundary, setDefaultBoundary] = useState<GeoJSON.FeatureCollection | null>(null);
@@ -109,17 +110,14 @@ export function useSpatialMapping({ parameter, aoi, filters }: UseSpatialMapping
 
   const bounds = useMemo(() => {
     if (aoi) {
-      const lats = aoi.kind === "rectangle" ? [aoi.bounds.latMin, aoi.bounds.latMax] : aoi.ring.map((p) => p[0]);
-      const lons = aoi.kind === "rectangle" ? [aoi.bounds.lonMin, aoi.bounds.lonMax] : aoi.ring.map((p) => p[1]);
-      return {
-        lat_min: Math.min(...lats),
-        lat_max: Math.max(...lats),
-        lon_min: Math.min(...lons),
-        lon_max: Math.max(...lons),
-      };
+      const b = boundsOf(aoi);
+      return { lat_min: b.latMin, lat_max: b.latMax, lon_min: b.lonMin, lon_max: b.lonMax };
+    }
+    if (selectedDataset?.spatial_extent) {
+      return selectedDataset.spatial_extent;
     }
     return DEFAULT_BOUNDS;
-  }, [aoi]);
+  }, [aoi, selectedDataset]);
 
   const breakpoints = useMemo(
     () =>
@@ -201,7 +199,7 @@ export function useSpatialMapping({ parameter, aoi, filters }: UseSpatialMapping
   // silently hid almost every marker whenever any bbox/depth filter was
   // active.
   const gisPoints = useMemo(() => {
-    return points.map((p) => ({ station: p.station, lat: p.lat, lon: p.lon, value: p.value, sizeValue: p.value }));
+    return points.map((p) => ({ station: p.station, lat: p.lat, lon: p.lon, value: p.value }));
   }, [points]);
 
   const values = gisPoints.map((p) => p.value);
