@@ -97,9 +97,17 @@ included) and proceed to step 7. The `certbot` service in
 ## 7. Bring up the stack
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 docker compose -f docker-compose.prod.yml ps   # confirm all services healthy
 ```
+
+`--build` is required on the first run (and after any code change) — both
+`backend` and `frontend` are built from local Dockerfiles, not pulled from a
+registry. The frontend build reads `NEXT_PUBLIC_API_URL`/
+`NEXT_PUBLIC_STORAGE_PUBLIC_URL` from `.env.prod` as build args (inlined into
+the browser bundle at `next build` time — see `docker-compose.prod.yml`'s
+`frontend.build.args`), so those two vars must already be correct in
+`.env.prod` before this step, not set afterward.
 
 The backend's start command runs `alembic upgrade head` automatically before
 starting Gunicorn, so migrations apply on every deploy without a manual step.

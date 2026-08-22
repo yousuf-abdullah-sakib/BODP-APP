@@ -13,6 +13,11 @@ x-backend-env: &backend-env
   JWT_SECRET_KEY: ${JWT_SECRET_KEY}
   CORS_ORIGINS: ${CORS_ORIGINS}
   STORAGE_VPS_ENDPOINT_URL: http://minio:9000
+  # Presigned URLs are followed directly by a browser, never routed
+  # through the backend — must be the public /storage/ path nginx
+  # proxies to MinIO (see nginx/conf.d/bodp.conf), not the internal
+  # Docker service name above, which isn't reachable from outside.
+  STORAGE_VPS_PUBLIC_ENDPOINT_URL: ${BACKEND_URL}/storage
   STORAGE_VPS_ACCESS_KEY: ${MINIO_ROOT_USER}
   STORAGE_VPS_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
   STORAGE_VPS_BUCKET: ${STORAGE_VPS_BUCKET:-bodp-vps}
@@ -152,18 +157,26 @@ services:
         condition: service_healthy
     command: celery -A app.worker.celery_app beat --loglevel=info
 
-  # Built in a later phase (frontend rebuild is out of scope for Phase 1) —
-  # placeholder service definition so `docker compose config` stays valid
-  # once ./frontend exists. Not started by default until then.
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   restart: unless-stopped
-  #   environment:
-  #     NEXT_PUBLIC_API_URL: ${BACKEND_URL}/api/v1
-  #   depends_on:
-  #     - backend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # NEXT_PUBLIC_* values are inlined into the browser JS bundle at
+      # `next build` time, not read at container start — must be passed
+      # as build args (not just `environment:` below) or the production
+      # build silently falls back to the Dockerfile's own defaults.
+      args:
+        NEXT_PUBLIC_API_URL: ${BACKEND_URL}/api/v1
+        NEXT_PUBLIC_STORAGE_PUBLIC_URL: ${STORAGE_VPS_PUBLIC_ENDPOINT_URL}
+    restart: unless-stopped
+    environment:
+      # Server Components/Route Handlers run inside this container, where
+      # "backend" is the real reachable Docker service DNS name — the
+      # browser-facing NEXT_PUBLIC_API_URL above is baked in separately
+      # for client-side code. See frontend/src/lib/api/client.ts.
+      API_URL_INTERNAL: http://backend:8000/api/v1
+    depends_on:
+      - backend
 
   nginx:
     image: nginx:1.27-alpine
