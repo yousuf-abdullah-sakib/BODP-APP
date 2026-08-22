@@ -40,7 +40,25 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject"
         ) from exc
 
-    result = await db.execute(select(User).where(User.id == user_id))
+    try:
+        result = await db.execute(select(User).where(User.id == user_id))
+    except Exception as exc:
+        # Phase 10.4 finding: every authenticated endpoint in the app
+        # 500s when Postgres is unreachable, since this DB round trip
+        # (needed to load the real User row a valid JWT points at) had
+        # no error handling at all — confirmed live by testing the new
+        # admin/health endpoint with Postgres stopped, which is supposed
+        # to degrade gracefully but never got the chance to, since this
+        # dependency failed before the endpoint's own code ever ran. A
+        # real 503 with a clear message is the correct response here —
+        # the token itself may well be valid, the backing store just
+        # isn't reachable right now, which is a different failure mode
+        # than "not authenticated" (401) and should not be reported as
+        # one.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable — please try again shortly.",
+        ) from exc
     user = result.scalar_one_or_none()
 
     if user is None:

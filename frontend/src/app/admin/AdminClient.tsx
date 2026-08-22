@@ -22,6 +22,7 @@ import MediaLibrarySection from "./sections/MediaLibrarySection";
 import OverviewSection from "./sections/OverviewSection";
 import ReportsSection from "./sections/ReportsSection";
 import BackupRecoverySection from "./sections/BackupRecoverySection";
+import SystemHealthSection from "./sections/SystemHealthSection";
 import RolesPermissionsSection from "./sections/RolesPermissionsSection";
 import SettingsSection from "./sections/SettingsSection";
 import SiteContentSection from "./sections/SiteContentSection";
@@ -111,7 +112,10 @@ export default function AdminClient() {
     },
     {
       title: "Operations",
-      items: [{ key: "backups", label: "Backups & Recovery", icon: "💾" }],
+      items: [
+        { key: "backups", label: "Backups & Recovery", icon: "💾" },
+        { key: "health", label: "System Health", icon: "🩺" },
+      ],
     },
   ];
 
@@ -150,6 +154,7 @@ export default function AdminClient() {
       {active === "analytics" && <AnalyticsSection />}
       {active === "reports" && <ReportsSection />}
       {active === "backups" && <BackupRecoverySection />}
+      {active === "health" && <SystemHealthSection />}
       {active === "audit" && <AuditLogSection />}
       {active === "settings" && <SettingsSection />}
       {active === "contact" && <ContactMessagesSection />}

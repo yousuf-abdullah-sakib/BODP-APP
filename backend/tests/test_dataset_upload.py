@@ -755,3 +755,81 @@ class TestUploadListing:
             f"/api/v1/admin/datasets/uploads/{uuid.uuid4()}", headers=admin_headers
         )
         assert r.status_code == 404
+
+
+class TestChecksumOnRead:
+    """Phase 10.5 — a file's bytes are re-verified against the checksum
+    captured at upload time immediately after every re-download from
+    storage, catching silent object-storage corruption rather than
+    letting it produce a confusing parse error or, worse, bad data that
+    happens to parse successfully."""
+
+    async def test_ingestion_fails_cleanly_when_stored_bytes_are_corrupted(self, client, admin_headers):
+        import uuid as uuid_module
+
+        from app.models.audit import AuditLogEntry
+        from app.services.storage.registry import get_storage_backend
+        from app.worker.tasks.ingestion import process_dataset_file
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("checksum_test.csv", _make_csv_bytes(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        dataset_file_id = body["dataset_file"]["id"]
+        upload_id = body["upload"]["id"]
+
+        async with AsyncSessionLocal() as db:
+            dataset_file = await db.get(DatasetFile, uuid_module.UUID(dataset_file_id))
+            storage_bucket = dataset_file.storage_bucket
+            storage_key = dataset_file.storage_key
+
+        # Simulates silent object-storage corruption — the DB row's
+        # checksum still reflects the original, valid upload.
+        storage = get_storage_backend("vps_minio")
+        storage.put(storage_bucket, storage_key, io.BytesIO(b"CORRUPTED, NOT THE REAL CSV"), content_type="text/csv")
+
+        result = process_dataset_file(dataset_file_id, upload_id)
+        assert result["status"] == "failed"
+        assert "checksum verification" in result["reason"]
+
+        async with AsyncSessionLocal() as db:
+            upload = await db.get(Upload, uuid_module.UUID(upload_id))
+            assert upload.status == "failed"
+            assert "checksum verification" in upload.error_message
+
+            audit_entries = (
+                await db.execute(
+                    select(AuditLogEntry).where(AuditLogEntry.target == f"dataset_file:{dataset_file_id}")
+                )
+            ).scalars().all()
+            assert len(audit_entries) == 1
+            assert audit_entries[0].action_type == "dataset"
+
+    async def test_ingestion_skips_check_when_no_checksum_recorded(self, client, admin_headers):
+        """A DatasetFile predating checksum tracking (checksum is nullable)
+        must not be treated as a failure — there's nothing to verify
+        against, which is a different situation from a real mismatch."""
+        import uuid as uuid_module
+
+        from app.worker.tasks.ingestion import process_dataset_file
+
+        dataset_id = await _create_dataset(client, admin_headers)
+        files = {"file": ("no_checksum_test.csv", _make_csv_bytes(), "text/csv")}
+        r = await client.post(
+            f"/api/v1/admin/datasets/{dataset_id}/files", files=files, headers=admin_headers
+        )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        dataset_file_id = body["dataset_file"]["id"]
+        upload_id = body["upload"]["id"]
+
+        async with AsyncSessionLocal() as db:
+            dataset_file = await db.get(DatasetFile, uuid_module.UUID(dataset_file_id))
+            dataset_file.checksum = None
+            await db.commit()
+
+        result = process_dataset_file(dataset_file_id, upload_id)
+        assert result["status"] == "complete"

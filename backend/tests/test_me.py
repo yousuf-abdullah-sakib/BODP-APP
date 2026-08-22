@@ -387,7 +387,9 @@ class TestCmsBlocks:
         assert len(r1.json()) == 1
 
         async with AsyncSessionLocal() as db:
-            block = await db.get(CmsBlock, "dashboard-help-test-2")
+            block = (
+                await db.execute(select(CmsBlock).where(CmsBlock.key == "dashboard-help-test-2"))
+            ).scalar_one()
             await db.delete(block)
             await db.commit()
 

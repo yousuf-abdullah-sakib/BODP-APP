@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useToast } from "@/context/ToastContext";
 import { getNotifications, markAllNotificationsRead, markNotificationRead } from "@/lib/api/me";
 import type { NotificationSummary } from "@/lib/types/me";
 
 const ICONS: Record<string, string> = { success: "✅", warning: "⚠️", info: "ℹ️", danger: "🚫" };
 
 export default function AdminNotificationsSection({ onMutate }: { onMutate: () => void }) {
+  const { toast } = useToast();
   const [items, setItems] = useState<NotificationSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,8 +33,7 @@ export default function AdminNotificationsSection({ onMutate }: { onMutate: () =
       refetch();
       onMutate();
     } catch {
-      // Best-effort — no toast context wired here to keep this section
-      // lightweight; a failed mark-all simply leaves items unread.
+      toast("Failed to mark all notifications as read.", "error");
     }
   }
 
@@ -43,7 +44,7 @@ export default function AdminNotificationsSection({ onMutate }: { onMutate: () =
       refetch();
       onMutate();
     } catch {
-      // no-op on failure
+      toast("Failed to mark notification as read.", "error");
     }
   }
 

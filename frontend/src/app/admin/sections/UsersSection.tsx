@@ -135,15 +135,31 @@ export default function UsersSection() {
       danger: true,
     });
     if (!ok) return;
-    await Promise.allSettled(Array.from(selected).map((id) => suspendUser(id)));
-    toast(`${selected.size} user(s) suspended.`, "success");
+    const results = await Promise.allSettled(Array.from(selected).map((id) => suspendUser(id)));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    const succeeded = results.length - failed;
+    if (failed === 0) {
+      toast(`${succeeded} user(s) suspended.`, "success");
+    } else if (succeeded === 0) {
+      toast(`Failed to suspend ${failed} user(s).`, "error");
+    } else {
+      toast(`${succeeded} user(s) suspended, ${failed} failed.`, "error");
+    }
     setSelected(new Set());
     refetch();
   }
 
   async function handleBulkActivate() {
-    await Promise.allSettled(Array.from(selected).map((id) => activateUser(id)));
-    toast(`${selected.size} user(s) activated.`, "success");
+    const results = await Promise.allSettled(Array.from(selected).map((id) => activateUser(id)));
+    const failed = results.filter((r) => r.status === "rejected").length;
+    const succeeded = results.length - failed;
+    if (failed === 0) {
+      toast(`${succeeded} user(s) activated.`, "success");
+    } else if (succeeded === 0) {
+      toast(`Failed to activate ${failed} user(s).`, "error");
+    } else {
+      toast(`${succeeded} user(s) activated, ${failed} failed.`, "error");
+    }
     setSelected(new Set());
     refetch();
   }

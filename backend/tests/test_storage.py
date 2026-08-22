@@ -120,6 +120,36 @@ class TestS3CompatibleBackend:
         storage.ensure_bucket("bodp-vps")
         storage.ensure_bucket("bodp-vps")
 
+    def test_list_keys_returns_exact_set(self, storage):
+        prefix = f"test-list-keys/{uuid.uuid4()}/"
+        keys = [f"{prefix}file_{i}.txt" for i in range(5)]
+        for key in keys:
+            storage.put("bodp-vps", key, io.BytesIO(b"x"))
+        try:
+            listed = set(storage.list_keys("bodp-vps", prefix))
+            assert listed == set(keys)
+        finally:
+            for key in keys:
+                storage.delete("bodp-vps", key)
+
+    def test_list_keys_empty_prefix_yields_nothing(self, storage):
+        assert list(storage.list_keys("bodp-vps", f"test-list-keys/nonexistent-{uuid.uuid4()}/")) == []
+
+    def test_list_keys_paginates_past_1000(self, storage):
+        """S3's list_objects_v2 caps a single page at 1000 keys — this
+        confirms the paginator this method wraps actually walks every
+        page rather than silently truncating at the first one."""
+        prefix = f"test-list-keys-page/{uuid.uuid4()}/"
+        keys = [f"{prefix}f{i:05d}.txt" for i in range(1500)]
+        for key in keys:
+            storage.put("bodp-vps", key, io.BytesIO(b""))
+        try:
+            listed = set(storage.list_keys("bodp-vps", prefix))
+            assert listed == set(keys)
+            assert len(listed) == 1500
+        finally:
+            storage.delete_prefix("bodp-vps", prefix)
+
 
 class TestMultipartUpload:
     def test_full_multipart_roundtrip(self, storage):

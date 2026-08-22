@@ -24,6 +24,7 @@ from app.routers import (
     admin_contact,
     admin_dataset_schema,
     admin_datasets,
+    admin_health,
     admin_media,
     admin_overview,
     admin_qc,
@@ -97,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_analytics.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_reports.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_backups.router, prefix=settings.API_V1_PREFIX)
+    app.include_router(admin_health.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_audit.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_about_team.router, prefix=settings.API_V1_PREFIX)
     app.include_router(admin_contact.router, prefix=settings.API_V1_PREFIX)

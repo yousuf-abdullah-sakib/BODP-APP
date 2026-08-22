@@ -244,6 +244,16 @@ class Settings(BaseSettings):
     # if a real production DB genuinely needs longer.
     BACKUP_PG_DUMP_TIMEOUT_SECONDS: int = 3600
 
+    # --- Monitoring (Master Plan §3 Phase 10 task 5) ---
+    # Filesystem path shutil.disk_usage checks in admin_health_service.py.
+    # Best-effort inside a container — the real signal is the HOST's disk
+    # usage, which this can only approximate unless the volume backing
+    # this path is bind-mounted from the host. VPS-level disk monitoring
+    # (see docs/VPS_PROVISIONING.md's ongoing-operations section) is the
+    # authoritative source in production; this check exists for a quick
+    # at-a-glance signal in the admin dashboard, not as a replacement.
+    DISK_USAGE_CHECK_PATH: str = "/"
+
     # --- Visualization engine (Master Plan §3 Phase 7) ---
     # Spatial interpolation requests at or below point_count * resolution^2
     # work units compute synchronously in-process; larger ones dispatch to

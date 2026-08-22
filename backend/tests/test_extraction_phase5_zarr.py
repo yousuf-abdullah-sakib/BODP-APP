@@ -256,6 +256,73 @@ class TestZarrBackedExtraction:
         assert r2.json()["output_size_bytes"] > 0
 
 
+class TestChecksumOnRead:
+    """Phase 10.5 — netcdf-format extraction is the one output format
+    whose source read resolves to the RAW upload (_source_for_format's
+    csv/parquet branch reads the processed artifact instead, which has
+    no checksum recorded against it) — the only extraction path this
+    check can actually exercise end-to-end."""
+
+    async def test_extraction_fails_cleanly_when_stored_bytes_are_corrupted(self, client, tmp_path):
+        import uuid as uuid_module
+
+        from app.models.catalog import DatasetFile
+        from app.models.requests import ExtractionStatus, SubsetExtraction
+        from app.services.storage.registry import get_storage_backend
+        from app.worker.tasks.extraction import process_extraction
+
+        admin_headers = await _admin_headers(client)
+        email = "extract5-researcher-checksum@example.com"
+        researcher_headers = await _researcher(client, email)
+        dataset_id = await _gridded_dataset(client, admin_headers, tmp_path, code="BD-EXT5-CHECKSUM")
+        grant_id = await _approved_grant(client, admin_headers, email, dataset_id=dataset_id)
+
+        async with AsyncSessionLocal() as db:
+            dataset_file = (
+                await db.execute(select(DatasetFile).where(DatasetFile.dataset_id == uuid.UUID(dataset_id)))
+            ).scalar_one()
+            storage_bucket = dataset_file.storage_bucket
+            storage_key = dataset_file.storage_key
+            assert dataset_file.checksum is not None
+
+        storage = get_storage_backend("vps_minio")
+        storage.put(storage_bucket, storage_key, io.BytesIO(b"CORRUPTED, NOT A REAL NETCDF FILE"), content_type="application/x-netcdf")
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(User).where(User.email == email))
+            user = result.scalar_one()
+            grant = (
+                await db.execute(select(AccessGrant).where(AccessGrant.dataset_id == uuid.UUID(dataset_id)))
+            ).scalar_one()
+            extraction = SubsetExtraction(
+                grant_id=grant.id,
+                requested_scope={},
+                format="netcdf",
+                status=ExtractionStatus.QUEUED.value,
+            )
+            db.add(extraction)
+            await db.commit()
+            await db.refresh(extraction)
+            extraction_id = str(extraction.id)
+
+        # process_extraction uses a sync session internally (get_sync_db)
+        # — run it directly, same as the Celery task would, without
+        # needing a broker round trip.
+        from app.core.database import get_sync_db
+
+        with get_sync_db() as sync_db:
+            result_dict = process_extraction(sync_db, extraction_id)
+
+        assert result_dict["status"] == "failed"
+        assert "checksum verification" in result_dict["reason"]
+
+        r = await client.get(f"/api/v1/me/extractions/{extraction_id}", headers=researcher_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "failed"
+        assert "checksum verification" in body["error_message"]
+
+
 class TestNetcdfParameterFiltering:
     """Data Page Filter & Extraction Audit, critical #2: NetcdfExtractor
     read scope.get("parameter") (singular) instead of scope["parameters"]

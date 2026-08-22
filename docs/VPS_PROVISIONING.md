@@ -3,6 +3,11 @@
 Reference: Master Plan §4 (sizing) and §3 Phase 1 task 8. Follow in order —
 each step depends on the one before it.
 
+Related docs: `docs/ENVIRONMENT_VARIABLES.md` (every setting referenced
+below, in full), `docs/DISASTER_RECOVERY.md` (what to do if this VPS, its
+database, or its object storage is lost), `docs/LOAD_TESTING.md` (re-run
+after any scaling change), `docs/SECURITY_AUDIT.md`, `docs/TESTING.md`.
+
 ## 1. Provision the VPS
 
 Minimum spec (Master Plan §4):
@@ -48,6 +53,28 @@ openssl rand -hex 24   # for POSTGRES_PASSWORD / MINIO_ROOT_PASSWORD
 Set the real domain in `nginx/conf.d/bodp.conf` (replace `bodp.example.org`
 in both `server_name` directives and the `ssl_certificate*` paths).
 
+### Rotating secrets
+
+A manual process — no automation is provided, since a secret rotation is
+infrequent enough that automating it would add more risk (a broken
+script mid-rotation) than it removes.
+
+- **`JWT_SECRET_KEY`**: update `.env.prod`, restart the `backend` and
+  `celery-worker*` services. Every currently active session is
+  invalidated immediately — every logged-in user is signed out and must
+  log in again. This is an expected, acceptable consequence of rotating
+  this specific secret, not a bug to work around.
+- **`POSTGRES_PASSWORD`** / **`MINIO_ROOT_PASSWORD`**: update `.env.prod`,
+  then restart in this order — the credential-owning service first, then
+  every service that connects to it: `postgres` (or `minio`) →
+  `backend`, `celery-worker`, `celery-worker-ingestion`, `celery-beat`.
+  Restarting a dependent service before the credential-owning one is
+  updated will fail its next connection attempt — order matters here.
+- **SMTP credentials**: update `.env.prod`, restart `backend` and the
+  Celery workers (email sending happens from both). No downtime — the
+  next send simply uses the new credentials; nothing holds a persistent
+  SMTP connection between sends.
+
 ## 6. First-run TLS certificate (chicken-and-egg with Nginx)
 
 Nginx's prod config expects certificates to already exist at
@@ -84,10 +111,11 @@ starting Gunicorn, so migrations apply on every deploy without a manual step.
 - [ ] HTTPS certificate is valid (browser padlock / `curl -vI`)
 - [ ] Port scan confirms 5432/6379/9000/9001/8000 are NOT reachable from outside the VPS
 
-## 9. Backups (bootstrap now, automate fully in Phase 10)
+## 9. Backups
 
 - [ ] Confirm `bodp_pgdata` and `bodp_minio_data` volumes are on durable storage
-- [ ] Set up an off-VPS destination for backups (separate disk, or the eventual cloud storage tier) — Phase 10 wires up the automated `pg_dump` + object-storage backup jobs; until then, take a manual `pg_dump` before any risky change
+- Automated nightly `pg_dump` backups (3 AM UTC), retention, and a real restore-verification path are wired up as of Phase 10.3 — see the admin "Backups & Recovery" section, `app/worker/tasks/backups.py`, and `app/scripts/test_backup_restore.py`. A nightly orphan sweep (Phase 10.5, 4 AM UTC) additionally checks for storage/DB drift across every storage-key-bearing table, backups included.
+- Object storage itself has no off-VPS destination yet (MinIO's volume is the only copy unless the optional cloud storage tier is configured — provider selection deferred per Master Plan §5) — see `docs/DISASTER_RECOVERY.md` for what this does and doesn't cover.
 
 ## 10. Ongoing operational notes
 
@@ -95,3 +123,4 @@ starting Gunicorn, so migrations apply on every deploy without a manual step.
 - Logs: `docker compose -f docker-compose.prod.yml logs -f <service>`
 - Scale Celery workers if background jobs queue up under load: `docker compose -f docker-compose.prod.yml up -d --scale celery-worker=3`
 - If Celery workers become the bottleneck under Phase 10 load testing, prefer a second dedicated worker VPS over vertically scaling this one (Master Plan §4 bump path)
+- Load testing: `backend/scripts/load_test.py` (Phase 10.6) — re-run after any scaling change to confirm the new configuration actually sustains real traffic; see `docs/LOAD_TESTING.md` for usage and the last captured pre-launch results.

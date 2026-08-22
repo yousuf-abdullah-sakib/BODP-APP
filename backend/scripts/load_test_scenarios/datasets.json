@@ -1,0 +1,39 @@
+{
+  "_comment": "Real dataset IDs/codes from the dev-stack Postgres, spot-checked against dataset_variables' approved Visualization Variables (Phase 10.6). A light/medium mix so catalog_search's text pool and visualization's parameter pool both exercise realistic variety rather than hammering one dataset.",
+  "visualization_targets": [
+    {
+      "dataset_id": "772f1a1d-134f-46dd-b3c4-29bfa1de1a30",
+      "code": "BD-SST-2022-2024",
+      "parameters": ["Sea Surface Temp", "Salinity"]
+    },
+    {
+      "dataset_id": "2a05a688-ba5a-4dff-87c7-e5f976c8b2fe",
+      "code": "BD-WQ-2020-2024",
+      "parameters": ["Turbidity", "Nitrate", "Coliform Count"]
+    },
+    {
+      "dataset_id": "dbfeb3fc-b21a-44bb-9f37-5909ced7b496",
+      "code": "BD-0015",
+      "parameters": ["temperature", "salinity", "density", "pressure"]
+    },
+    {
+      "dataset_id": "95b36681-d003-480b-a596-03e14ab30621",
+      "code": "BD-0016",
+      "parameters": ["temperature", "salinity", "density", "pressure"]
+    }
+  ],
+  "request_submission_targets": [
+    { "dataset_id": "772f1a1d-134f-46dd-b3c4-29bfa1de1a30", "code": "BD-SST-2022-2024" },
+    { "dataset_id": "2a05a688-ba5a-4dff-87c7-e5f976c8b2fe", "code": "BD-WQ-2020-2024" },
+    { "dataset_id": "a465283e-cdfe-4529-8b57-34dcb3cd940a", "code": "BD-SAL-SDB-2024" },
+    { "dataset_id": "a8097a04-9e7e-4100-abc8-80c65b451afd", "code": "BD-MPL-CXB-2024" }
+  ],
+  "catalog_search_terms": ["temperature", "salinity", "water quality", "wave", "wind", "microplastics", "sundarbans", "coastal"],
+  "catalog_categories": ["Environmental", "Water Quality", "Hydrological", "Pollution"],
+  "spatial_bounds": {
+    "lat_min": 20.5,
+    "lat_max": 22.5,
+    "lon_min": 89.0,
+    "lon_max": 92.0
+  }
+}

@@ -148,6 +148,14 @@ class StorageService(ABC):
         ...
 
     @abstractmethod
+    def list_keys(self, bucket: str, prefix: str) -> Iterable[str]:
+        """Yields every object key under `prefix`, paginated internally so
+        an arbitrarily large prefix is never loaded into memory at once
+        (Phase 10.5 — the orphan sweep's storage-to-DB direction, the one
+        real list-objects need in the app; every other call site works
+        with keys it already knows, so this stays the only consumer)."""
+
+    @abstractmethod
     def stat(self, bucket: str, key: str) -> StorageObject | None:
         """Return metadata (size, etag, content-type) without downloading
         the object body, or None if it doesn't exist."""

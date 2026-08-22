@@ -19,6 +19,7 @@ celery_app = Celery(
         "app.worker.tasks.bulk_import",
         "app.worker.tasks.snapshots",
         "app.worker.tasks.backups",
+        "app.worker.tasks.integrity",
     ],
 )
 
@@ -104,5 +105,12 @@ celery_app.conf.beat_schedule = {
     "run-nightly-backup": {
         "task": "backups.run_scheduled_backup",
         "schedule": crontab(hour=3, minute=0),
+    },
+    # Phase 10.5 — after the 3 AM backup so the sweep's known-key
+    # inventory also picks up that night's fresh backup object, before
+    # the 6 AM admin-jobs window.
+    "orphan-sweep-nightly": {
+        "task": "integrity.orphan_sweep",
+        "schedule": crontab(hour=4, minute=0),
     },
 }

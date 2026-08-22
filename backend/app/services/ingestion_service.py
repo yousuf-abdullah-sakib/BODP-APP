@@ -19,6 +19,12 @@ class UploadValidationError(Exception):
     content-type mismatch (Master Plan §3 Phase 2 task 6)."""
 
 
+class IntegrityError(Exception):
+    """Raised when a file read back from object storage doesn't match the
+    checksum recorded at upload time (Phase 10.5) — signals possible
+    storage-layer corruption, distinct from a bad/malformed upload."""
+
+
 def validate_extension(filename: str) -> str:
     ext = Path(filename).suffix.lower().lstrip(".")
     if ext not in _SUPPORTED_EXTENSIONS:

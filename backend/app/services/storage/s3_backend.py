@@ -228,6 +228,16 @@ class S3CompatibleBackend(StorageService):
     def exists(self, bucket: str, key: str) -> bool:
         return self.stat(bucket, key) is not None
 
+    def list_keys(self, bucket: str, prefix: str):
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    yield obj["Key"]
+        except ClientError as exc:
+            logger.exception("storage.list_keys_failed", backend=self._name, bucket=bucket, prefix=prefix)
+            raise StorageBackendError(f"Failed to list keys under {bucket}/{prefix}") from exc
+
     def stat(self, bucket: str, key: str) -> StorageObject | None:
         try:
             response = self._client.head_object(Bucket=bucket, Key=key)

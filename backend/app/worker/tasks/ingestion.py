@@ -14,8 +14,10 @@ from sqlalchemy import cast, delete, func, select
 
 from app.core.config import settings
 from app.core.database import get_sync_db
+from app.models.audit import AuditActionType, AuditLogEntry
 from app.models.catalog import Dataset, DatasetFile, DatasetRecord, DatasetVariable, StorageKind, VariableDataType
 from app.models.uploads import QualityIssue, Upload, UploadStatus
+from app.services.ingestion_service import IntegrityError, verify_checksum
 from app.services.parsers import ParserError, get_parser_for_format
 from app.services.parsers.base import DataShape, ParsedFileMetadata, ProcessedArtifact
 from app.services.storage.base import StorageService, UploadItem
@@ -258,6 +260,38 @@ def process_dataset_file(self, dataset_file_id: str, upload_id: str | None = Non
                 ),
             )
             return {"status": "failed", "reason": "zarr_upload_failed"}
+        except IntegrityError as exc:
+            # Distinct from ParserError below: this means the bytes read
+            # back from storage don't match what was uploaded — a
+            # storage-layer corruption signal, not a bad/malformed
+            # upload. Written to the audit log (actor_id=None — a
+            # system-detected event, no human actor) so a silent
+            # corruption incident is discoverable there, not just an
+            # ordinary ingestion failure indistinguishable from a bad
+            # file.
+            logger.error(
+                "ingestion.checksum_mismatch",
+                dataset_file_id=dataset_file_id,
+                reason=str(exc),
+            )
+            try:
+                db.add(
+                    AuditLogEntry(
+                        actor_id=None,
+                        actor_name="System (Integrity Check)",
+                        actor_email=None,
+                        action="Checksum verification failed during ingestion",
+                        action_type=AuditActionType.DATASET.value,
+                        target=f"dataset_file:{dataset_file_id}",
+                        ip_address=None,
+                    )
+                )
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("ingestion.integrity_audit_log_failed", dataset_file_id=dataset_file_id)
+            _set_upload_terminal_state(upload_id, status=UploadStatus.FAILED.value, error_message=str(exc))
+            return {"status": "failed", "reason": str(exc)}
         except ParserError as exc:
             logger.warning(
                 "ingestion.parse_rejected",
@@ -532,6 +566,20 @@ def _run_ingestion(db, dataset_file: DatasetFile, *, upload: Upload | None = Non
         with open(raw_local_path, "wb") as f:
             while chunk := body.read(1024 * 1024):
                 f.write(chunk)
+
+        # Phase 10.5: DatasetFile.checksum is captured against this exact
+        # raw upload at upload time (dataset_file_service.py) — verifying
+        # it here, right after download and before any parsing, catches
+        # silent object-storage corruption at the earliest possible point
+        # rather than letting a corrupted file produce confusing
+        # downstream parse errors (or worse, bad data that parses
+        # successfully). None means the file predates checksum tracking —
+        # nothing to verify against, not a failure.
+        if dataset_file.checksum and not verify_checksum(raw_local_path, dataset_file.checksum):
+            raise IntegrityError(
+                "Stored file failed checksum verification — possible corruption in "
+                "object storage. Please contact an administrator."
+            )
 
         # Checkpoint 1: after the (potentially large) raw download, before
         # the expensive parse/convert step — cancelling during a multi-GB

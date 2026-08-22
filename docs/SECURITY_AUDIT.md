@@ -254,3 +254,62 @@ forward.
   decorators; 20 further authenticated/permission-gated router files
   remain affected and are tracked as real, explicit technical debt, not
   silently resolved.
+- 2026-08-21 — Phase 10.4: built the detailed `/admin/health` endpoint
+  and `SystemHealthSection.tsx`. Found and fixed two real reliability
+  bugs surfaced by the phase's own DB-down/storage-down/Celery-down test
+  matrix:
+  1. **`get_current_user` (`core/deps.py`) had no error handling around
+     its DB query** — confirmed live that EVERY authenticated endpoint
+     in the app (not just the new health check) 500s with a raw
+     traceback when Postgres is unreachable, since JWT validation itself
+     requires a DB round trip to load the real `User` row. Fixed with a
+     proper try/except returning a clean `503 Service Unavailable`
+     instead. This is an app-wide reliability fix, not scoped to
+     monitoring — flagged here since Phase 10.4's test matrix is what
+     surfaced it.
+  2. **`S3CompatibleBackend`'s shared boto3 client has no configured
+     connect/read timeout** — confirmed live that a genuinely
+     unreachable storage endpoint took 24 real seconds to report
+     unhealthy (boto3's ~60s default × retry mode), not a crash but a
+     bad experience for anything that needs to fail fast. Fixed at the
+     health-check call site only (wrapped with a 3s
+     `asyncio.wait_for`), deliberately NOT changing the shared client's
+     global timeout — every real upload/download in the app uses that
+     same client, where a longer timeout is often correct for a large,
+     slow-but-alive transfer. Also moved the Celery `inspect()` call
+     (a real blocking network round trip) onto a thread via
+     `asyncio.to_thread`, since it was blocking the event loop for up to
+     3s per health check otherwise, which would have stalled every OTHER
+     concurrent request this worker process was handling.
+  Full failure-mode matrix verified live: DB/Redis/storage/Celery each
+  stopped individually and confirmed graceful degradation (no 500,
+  correct partial-unhealthy reporting, other subsystems unaffected);
+  permission gating confirmed (403 for non-admin); `last_backup`
+  confirmed surfacing a real completed backup row.
+  App-wide regression suite (`test_auth.py`, `test_me.py`,
+  `test_admin_datasets.py`, `test_catalog.py`, `test_requests.py` — the
+  widest-reaching cross-section, since `get_current_user` is used
+  app-wide) run after the `deps.py` fix: 1 failure, unrelated to this
+  change — `test_me.py::TestCmsBlocks::test_get_blocks_uses_cache_on_second_call`
+  called `db.get(CmsBlock, "dashboard-help-test-2")`, passing the
+  human-readable `key` column value where `CmsBlock`'s actual PK is a
+  UUID (`UUIDPKMixin`) — a pre-existing latent bug in the test itself,
+  present since it was first written, unrelated to caching or to this
+  phase's changes. Fixed the lookup to `select(CmsBlock).where(CmsBlock.key
+  == ...)`. Full suite re-run clean: 133/133 passed.
+- 2026-08-22 — Phase 10.5 (A08 Software/Data Integrity, closing the
+  linkage this section's original pass deferred to this phase): full
+  design, implementation, and live-verification detail lives in
+  `docs/DATA_INTEGRITY.md`, not duplicated here. Summary: checksum-on-read
+  wired into both ingestion and extraction (catches silent object-storage
+  corruption of an individual file at the moment it's re-read, before
+  it's parsed or re-served); a new report-only orphan sweep
+  (`integrity.orphan_sweep`, nightly + manual CLI) checks DB-to-storage
+  and storage-to-DB drift across every storage-key-bearing table. Live
+  run against the real dev stack surfaced two genuine findings — 28,844
+  storage-to-db orphans (near-entirely leftover test/benchmark artifacts
+  from this project's own testing history, not real user data) and one
+  db-to-storage break (a leftover manually-inserted test fixture row,
+  `storage_key="raw/fake"`) — both left for the project owner's own
+  cleanup decision rather than auto-deleted, per the sweep's deliberate
+  report-only design.

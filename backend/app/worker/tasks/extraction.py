@@ -9,6 +9,7 @@ from app.core.database import get_sync_db
 from app.models.catalog import Dataset, DatasetFile, StorageKind
 from app.models.requests import AccessGrant, ExtractionStatus, SubsetExtraction
 from app.services.extractors import ExtractorError, bundle_as_zip, get_extractor_for_format
+from app.services.ingestion_service import verify_checksum
 from app.services.storage.keys import extract_key
 from app.services.storage.registry import default_bucket_for, get_storage_backend
 from app.worker.celery_app import celery_app
@@ -122,6 +123,27 @@ def _run_extraction(db, extraction: SubsetExtraction) -> dict:
                 with open(local_input, "wb") as f:
                     while chunk := body.read(1024 * 1024):
                         f.write(chunk)
+
+                # Phase 10.5: catches silent object-storage corruption
+                # before it's baked into a user-facing download.
+                # DatasetFile.checksum is captured against the RAW
+                # upload only (dataset_file_service.py) — _source_for_format
+                # can instead return the PROCESSED Parquet key for a
+                # csv/parquet extraction of a non-Zarr file, which would
+                # never match that checksum and isn't the object it
+                # protects. Only verify when source_key actually is the
+                # raw object; skip otherwise (not a failure — simply
+                # nothing to check here). None checksum means the file
+                # predates checksum tracking — also not a failure.
+                if (
+                    dataset_file.checksum
+                    and source_key == dataset_file.storage_key
+                    and not verify_checksum(local_input, dataset_file.checksum)
+                ):
+                    raise ExtractorError(
+                        "Stored file failed checksum verification — possible corruption in "
+                        "object storage. Please contact an administrator."
+                    )
 
             out_dir = tmp_dir_path / f"out_{i}"
             out_dir.mkdir(exist_ok=True)
